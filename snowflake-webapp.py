@@ -5,13 +5,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime, timedelta
-import json
+# json not needed with _snowflake module approach
 import time
 import requests
 from typing import List, Dict, Any, Optional
 import re
 import base64
 from snowflake.snowpark.context import get_active_session
+# Remove unused import
 
 # Page configuration
 st.set_page_config(
@@ -220,6 +221,15 @@ st.markdown("""
         font-size: 14px;
     }
     
+    .status-warning {
+        background: linear-gradient(135deg, #ffeaa7 0%, #fdcb6e 100%);
+        color: #e17055;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-weight: 600;
+        font-size: 14px;
+    }
+    
     /* Hide Streamlit elements */
     .stDeployButton {
         display: none;
@@ -256,115 +266,265 @@ def get_snowflake_session():
         return None
 
 def get_cortex_analyst_token():
-    """Get authentication token for Cortex Analyst API - In Snowflake, this is handled natively"""
+    """Get authentication token for Cortex Analyst API in SiS environment"""
     try:
-        # In Snowflake environment, authentication is handled natively
-        # Return a placeholder for compatibility
-        return "snowflake_native_auth"
-    except Exception as e:
-        st.error(f"Error getting authentication: {e}")
+        # In SiS environment, we can extract the token from the session
+        session = get_snowflake_session()
+        if session:
+            # Use Snowpark's session to get connection info
+            # Extract token from connection parameters if available
+            conn = session._conn
+            if hasattr(conn, 'token') and conn.token:
+                return conn.token
+            
+            # Alternative: try to get from environment variables that SiS sets
+            import os
+            snowflake_token = os.environ.get('SNOWFLAKE_TOKEN')
+            if snowflake_token:
+                return snowflake_token
+                
+            # For SiS, the session already has authentication context
+            # We'll handle this in the API call
+            return "sis_session_auth"
         return None
+    except Exception as e:
+        st.warning(f"Token extraction failed, will use session context: {e}")
+        return "sis_session_auth"
 
 def call_cortex_analyst_api(user_query: str, semantic_views: List[str]) -> Dict[str, Any]:
     """
-    Call Cortex Analyst REST API to understand user query and generate SQL
+    Call Cortex Analyst REST API using proper authentication for SiS environment
     """
+    session = get_snowflake_session()
+    if not session:
+        return None
+    
+    # Get account information and construct proper account URL
     try:
-        # In Snowflake environment, we'll use a simplified approach
-        # that works with Snowflake's built-in Cortex Analyst capabilities
+        account_info = session.sql("SELECT CURRENT_ACCOUNT() as account, CURRENT_REGION() as region").collect()
+        if not account_info:
+            return None
         
-        # For now, we'll use a simple query mapping approach
-        # In production, this would integrate with Cortex Analyst MCP server
-        return {
-            "sql": generate_sql_for_query(user_query, semantic_views),
-            "interpretation": f"AI Analysis: {user_query} - This query has been processed by Cortex Analyst to extract relevant data from the semantic views.",
-            "status": "success"
-        }
+        account = account_info[0]['ACCOUNT']
+        region = account_info[0]['REGION']
+        
+        # Construct the correct account URL for API calls
+        account_url = f"{account}.{region}.snowflakecomputing.com"
         
     except Exception as e:
-        st.error(f"Error calling Cortex Analyst: {e}")
+        st.error(f"Error getting account info: {e}")
+        return None
+    
+    # Get authentication token
+    token = get_cortex_analyst_token()
+    
+    # For SiS environment, use session-based authentication with requests
+    if token == "sis_session_auth":
+        # Use session credentials for API call
+        return call_cortex_analyst_with_session_auth(user_query, semantic_views, account_url, session)
+    elif token:
+        # Use token-based authentication
+        return call_cortex_analyst_with_token(user_query, semantic_views, account_url, token)
+    else:
+        st.error("No valid authentication method available")
         return None
 
+def call_cortex_analyst_with_token(user_query: str, semantic_views: List[str], account_url: str, token: str) -> Dict[str, Any]:
+    """Call Cortex Analyst REST API with token authentication"""
+    # Prepare the request payload - Note: Using semantic_models not semantic_views
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_query
+                    }
+                ]
+            }
+        ],
+        "semantic_models": [
+            {"semantic_view": f"SNOWFLAKE_MONITORING.MONITORING_SEMANTIC.{view}"} 
+            for view in semantic_views
+        ],
+        "stream": False
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        url = f"https://{account_url}/api/v2/cortex/analyst/message"
+        
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Cortex Analyst API error: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error calling Cortex Analyst API: {e}")
+        return None
+
+def call_cortex_analyst_with_session_auth(user_query: str, semantic_views: List[str], account_url: str, session) -> Dict[str, Any]:
+    """Call Cortex Analyst using session-based approach for SiS without side effects"""
+    try:
+        # In SiS, we can't use SYSTEM$ functions with side effects
+        # Instead, we'll use the Snowpark session's built-in request capabilities
+        # This is the approach recommended by the Snowflake quickstart
+        
+        # Import the necessary modules for SiS
+        try:
+            import _snowflake
+        except ImportError:
+            st.error("This functionality requires Streamlit in Snowflake environment")
+            return None
+        
+        # Create the request body as per Snowflake documentation
+        request_body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": user_query
+                        }
+                    ]
+                }
+            ],
+            "semantic_models": [
+                {"semantic_view": f"SNOWFLAKE_MONITORING.MONITORING_SEMANTIC.{view}"} 
+                for view in semantic_views
+            ],
+        }
+        
+        # Use _snowflake.send_snow_api_request which is available in SiS
+        API_ENDPOINT = "/api/v2/cortex/analyst/message"
+        API_TIMEOUT = 30
+        
+        resp = _snowflake.send_snow_api_request(
+            "POST",
+            API_ENDPOINT,
+            {},  # headers
+            {},  # params
+            request_body,  # request body
+            None,  # request_guid
+            API_TIMEOUT,
+        )
+        
+        if resp and resp.get('status') == 200:
+            # Parse the JSON content from the response
+            import json
+            content = resp.get('content', '{}')
+            if isinstance(content, str):
+                return json.loads(content)
+            else:
+                return content
+        else:
+            st.error(f"Cortex Analyst API error: {resp}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Session-based API call failed: {e}")
+        return None
+
+# Removed old function - using proper REST API approach above
+
 def generate_sql_for_query(user_query: str, semantic_views: List[str]) -> str:
-    """Generate SQL based on user query and available semantic views"""
+    """Generate SQL based on user query and available semantic views using SEMANTIC_VIEW function"""
     query_lower = user_query.lower()
     
-    # Simple query mapping - in production, this would be handled by Cortex Analyst
+    # Enhanced query mapping that uses SEMANTIC_VIEW function for SiS compatibility
     if 'total' in query_lower and ('cost' in query_lower or 'usage' in query_lower):
         return """
-        SELECT 
-            SUM(TOTAL_CREDITS) as TOTAL_CREDITS,
-            SUM(TOTAL_QUERIES) as TOTAL_QUERIES,
-            AVG(AVG_EXECUTION_TIME) as AVG_EXECUTION_TIME
-        FROM snowflake_monitoring_semantic
+        SELECT * FROM SEMANTIC_VIEW(
+            snowflake_monitoring_semantic
+            DIMENSIONS
+            METRICS TOTAL_CREDITS, TOTAL_QUERIES, AVG_EXECUTION_TIME
+        )
         """
     elif 'warehouse' in query_lower and ('cost' in query_lower or 'credits' in query_lower):
         return """
-        SELECT 
-            WAREHOUSE_NAME,
-            SUM(TOTAL_CREDITS) as TOTAL_CREDITS,
-            SUM(TOTAL_QUERIES) as TOTAL_QUERIES
-        FROM snowflake_monitoring_semantic
-        GROUP BY WAREHOUSE_NAME
+        SELECT * FROM SEMANTIC_VIEW(
+            snowflake_monitoring_semantic
+            DIMENSIONS WAREHOUSE_NAME
+            METRICS TOTAL_CREDITS, TOTAL_QUERIES
+        )
         ORDER BY TOTAL_CREDITS DESC
         """
     elif 'slow' in query_lower or 'execution' in query_lower:
         return """
-        SELECT 
-            WAREHOUSE_NAME,
-            AVG(AVG_EXECUTION_TIME) as AVG_EXECUTION_TIME,
-            COUNT(*) as QUERY_COUNT
-        FROM query_performance_semantic
-        GROUP BY WAREHOUSE_NAME
+        SELECT * FROM SEMANTIC_VIEW(
+            query_performance_semantic
+            DIMENSIONS WAREHOUSE_NAME
+            METRICS AVG_EXECUTION_TIME
+        )
         ORDER BY AVG_EXECUTION_TIME DESC
         """
     elif 'user' in query_lower and ('active' in query_lower or 'count' in query_lower):
         return """
-        SELECT 
-            USER_NAME,
-            SUM(TOTAL_USER_QUERIES) as TOTAL_QUERIES,
-            AVG(AVG_USER_EXECUTION_TIME) as AVG_EXECUTION_TIME
-        FROM user_activity_semantic
-        GROUP BY USER_NAME
-        ORDER BY TOTAL_QUERIES DESC
+        SELECT * FROM SEMANTIC_VIEW(
+            user_activity_semantic
+            DIMENSIONS USER_NAME
+            METRICS TOTAL_USER_QUERIES, AVG_USER_EXECUTION_TIME
+        )
+        ORDER BY TOTAL_USER_QUERIES DESC
         LIMIT 10
         """
     elif 'suspicious' in query_lower or 'security' in query_lower:
         return """
-        SELECT 
-            USER_NAME,
-            SUM(SUSPICIOUS_ACTIVITY) as SUSPICIOUS_COUNT,
-            SUM(LONG_RUNNING_QUERIES) as LONG_RUNNING_COUNT
-        FROM security_monitoring_semantic
+        SELECT * FROM SEMANTIC_VIEW(
+            security_monitoring_semantic
+            DIMENSIONS USER_NAME
+            METRICS SUSPICIOUS_ACTIVITY, LONG_RUNNING_QUERIES
+        )
         WHERE SUSPICIOUS_ACTIVITY > 0 OR LONG_RUNNING_QUERIES > 0
-        GROUP BY USER_NAME
-        ORDER BY SUSPICIOUS_COUNT DESC
+        ORDER BY SUSPICIOUS_ACTIVITY DESC
         """
     else:
-        # Default query
+        # Default query using semantic view
         return """
-        SELECT * FROM snowflake_monitoring_semantic
+        SELECT * FROM SEMANTIC_VIEW(
+            snowflake_monitoring_semantic
+            DIMENSIONS WAREHOUSE_NAME, USER_NAME
+            METRICS TOTAL_CREDITS, TOTAL_QUERIES
+        )
         LIMIT 100
         """
 
 def extract_sql_from_cortex_response(cortex_response: Dict[str, Any]) -> Optional[str]:
-    """Extract SQL from Cortex Analyst response"""
+    """Extract SQL statement from Cortex Analyst response - Same as local app.py"""
     try:
-        if isinstance(cortex_response, dict):
-            return cortex_response.get("sql", "")
+        if 'message' in cortex_response and 'content' in cortex_response['message']:
+            for content in cortex_response['message']['content']:
+                if content.get('type') == 'sql' and 'statement' in content:
+                    return content['statement']
         return None
     except Exception as e:
-        st.error(f"Error extracting SQL: {e}")
+        st.error(f"Error extracting SQL from Cortex response: {e}")
         return None
 
 def extract_text_from_cortex_response(cortex_response: Dict[str, Any]) -> Optional[str]:
-    """Extract text interpretation from Cortex Analyst response"""
+    """Extract text explanation from Cortex Analyst response - Same as local app.py"""
     try:
-        if isinstance(cortex_response, dict):
-            return cortex_response.get("interpretation", "")
+        if 'message' in cortex_response and 'content' in cortex_response['message']:
+            for content in cortex_response['message']['content']:
+                if content.get('type') == 'text' and 'text' in content:
+                    return content['text']
         return None
     except Exception as e:
-        st.error(f"Error extracting text: {e}")
+        st.error(f"Error extracting text from Cortex response: {e}")
         return None
 
 def execute_raw_sql_query(sql_query: str) -> Optional[pd.DataFrame]:
@@ -476,12 +636,12 @@ def chat_interface():
         st.title("🤖 AI-Powered Queries")
         
         # How It Works
-        st.subheader("🔍 How It Works")
+        st.subheader("🔍 How It Works (SiS)")
         st.info("""
-        1. **AI Understanding**: Cortex Analyst interprets your natural language
-        2. **Smart Selection**: Automatically chooses the best semantic view
-        3. **SQL Generation**: Creates optimized SQL queries
-        4. **Enhanced Results**: Provides insights and visualizations
+        1. **Native AI Integration**: Uses Snowflake's CORTEX.ANALYST function
+        2. **Semantic View Selection**: Automatically queries appropriate semantic views
+        3. **Optimized Queries**: Generates SEMANTIC_VIEW() function calls
+        4. **SiS Environment**: Runs entirely within Snowflake infrastructure
         """)
         
         # Suggested Queries with Click Functionality
@@ -518,8 +678,19 @@ def chat_interface():
         
         st.markdown("")  # Add spacing
         
-        # Cortex Analyst status
-        st.markdown('<div class="status-success">✅ Cortex Analyst Ready</div>', unsafe_allow_html=True)
+        # Cortex Analyst status - Check availability
+        token = get_cortex_analyst_token()
+        if token and token != "sis_session_auth":
+            st.markdown('<div class="status-success">✅ Cortex Analyst Ready (Token Auth)</div>', unsafe_allow_html=True)
+        elif token == "sis_session_auth":
+            try:
+                # Test if we can import _snowflake module (available in SiS)
+                import _snowflake
+                st.markdown('<div class="status-success">✅ Cortex Analyst Ready (SiS Native)</div>', unsafe_allow_html=True)
+            except ImportError:
+                st.markdown('<div class="status-warning">⚠️ Running outside SiS environment</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="status-warning">⚠️ Using basic query functionality</div>', unsafe_allow_html=True)
     
     # Main chat area
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -552,7 +723,7 @@ def chat_interface():
                 cortex_response = call_cortex_analyst_api(prompt, semantic_views)
                 
                 if cortex_response:
-                    # Extract AI interpretation and SQL
+                    # Extract AI interpretation and SQL - exactly like local app.py
                     ai_interpretation = extract_text_from_cortex_response(cortex_response)
                     generated_sql = extract_sql_from_cortex_response(cortex_response)
                     
@@ -574,7 +745,7 @@ def chat_interface():
                             </div>
                             """, unsafe_allow_html=True)
                         
-                        # Step 2: Execute the generated SQL
+                        # Step 2: Execute the generated SQL - exactly like local app.py
                         with st.spinner("📊 Executing query..."):
                             df = execute_raw_sql_query(generated_sql)
                             
@@ -602,7 +773,7 @@ def chat_interface():
                         st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
                         st.session_state.messages.append({"role": "assistant", "content": error_msg})
                 else:
-                    error_msg = "❌ Cortex Analyst couldn't process your query. Try rephrasing your question."
+                    error_msg = "❌ Failed to connect to Cortex Analyst. Please check your configuration."
                     st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
     
@@ -705,7 +876,16 @@ def dashboard_view():
         st.markdown('</div>', unsafe_allow_html=True)
 
 def main():
-    """Main application function"""
+    """Main application function for Streamlit in Snowflake (SiS)"""
+    # Show app info for SiS environment
+    st.sidebar.markdown("""
+    ### 🏔️ Streamlit in Snowflake (SiS)
+    This app runs natively in Snowflake and uses:
+    - Native Snowpark Session
+    - Cortex Analyst Integration
+    - Semantic Views for AI Queries
+    """)
+    
     # Navigation
     st.sidebar.title("🎯 Navigation")
     page = st.sidebar.selectbox(
@@ -719,11 +899,12 @@ def main():
     elif page == "📊 Dashboard View":
         dashboard_view()
     
-    # Footer
+    # Footer with SiS specific information
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666;'>"
-        "Powered by Snowflake Cortex Analyst & Semantic Views | "
+        "🏔️ Powered by Snowflake Streamlit in Snowflake (SiS) | "
+        "Cortex Analyst & Semantic Views | "
         f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         "</div>",
         unsafe_allow_html=True
