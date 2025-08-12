@@ -139,17 +139,31 @@ The main interface featuring:
 5. **Results**: Displays data, insights, and visualizations
 6. **Chat History**: Maintains conversation context
 
-**Sample Questions the AI Can Handle:**
+**Natural Language Queries:**
 
-The app provides 5 diverse AI-optimized query suggestions covering different use cases:
+The app supports **any natural language question** about your Snowflake data, with convenient clickable suggestions!
 
-1. **"What's the total cost of our Snowflake usage?"** - Cost overview and analysis
-2. **"Which warehouses are consuming the most credits?"** - Resource utilization analysis  
-3. **"Show me the average query execution time by warehouse"** - Performance monitoring
-4. **"Who are the top users by query count?"** - User activity analysis
-5. **"Show me suspicious user activity"** - Security monitoring
+**Quick Start - Click These Questions:**
+- "What's our total Snowflake usage?"
+- "Which warehouses cost the most?"
+- "Show me slow queries"
+- "Who are the most active users?"
+- "Any suspicious activity?"
 
-These queries are carefully selected to work optimally with the available semantic views and provide comprehensive insights across cost, performance, and security domains.
+**Or Ask Anything Naturally:**
+- "What's our peak usage time?"
+- "How much data are we scanning?"
+- "Which users have the longest running queries?"
+- "Show me cost trends over time"
+- "Which warehouses are underutilized?"
+
+**The AI handles everything:**
+- Query interpretation
+- SQL generation
+- Data analysis
+- Insight generation
+- Result presentation
+- Automatic visualizations
 
 ### **2. Dashboard View**
 Traditional BI dashboard featuring:

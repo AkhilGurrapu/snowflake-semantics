@@ -53,17 +53,31 @@ The application supports 6 semantic views:
 5. **`resource_utilization_semantic`** - Resource usage
 6. **`security_monitoring_semantic`** - Security and access
 
-## 💡 Suggested Questions
+## 💡 Natural Language Queries
 
-The application includes 5 diverse AI-optimized questions covering different use cases:
+The application supports **any natural language question** about your Snowflake data, with convenient clickable suggestions!
 
-1. **"What's the total cost of our Snowflake usage?"** - Cost overview and analysis
-2. **"Which warehouses are consuming the most credits?"** - Resource utilization analysis  
-3. **"Show me the average query execution time by warehouse"** - Performance monitoring
-4. **"Who are the top users by query count?"** - User activity analysis
-5. **"Show me suspicious user activity"** - Security monitoring
+**Quick Start - Click These Questions:**
+- "What's our total Snowflake usage?"
+- "Which warehouses cost the most?"
+- "Show me slow queries"
+- "Who are the most active users?"
+- "Any suspicious activity?"
 
-These queries are carefully selected to work optimally with the available semantic views and provide comprehensive insights across cost, performance, and security domains.
+**Or Ask Anything Naturally:**
+- "What's our peak usage time?"
+- "How much data are we scanning?"
+- "Which users have the longest running queries?"
+- "Show me cost trends over time"
+- "Which warehouses are underutilized?"
+
+**The AI handles everything:**
+- Query interpretation
+- SQL generation
+- Data analysis
+- Insight generation
+- Result presentation
+- Automatic visualizations
 
 ## 🔧 Technical Implementation
 

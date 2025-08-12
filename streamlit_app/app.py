@@ -508,91 +508,53 @@ def format_duration(seconds: float) -> str:
         hours = seconds / 3600
         return f"{hours:.1f}h"
 
-def generate_insights(df: pd.DataFrame, query: str) -> List[str]:
-    """Generate AI-powered insights using vectorized operations"""
-    insights = []
-    
-    if df.empty:
-        return ["No data available for the specified query."]
-    
-    # Vectorized analysis for better performance
-    if 'TOTAL_CREDITS' in df.columns:
-        total_credits = float(df['TOTAL_CREDITS'].sum())
-        if total_credits > 100:
-            insights.append(f"💰 High credit consumption: {total_credits:.2f} credits")
-        
-        if 'WAREHOUSE_NAME' in df.columns:
-            top_warehouse = df.groupby('WAREHOUSE_NAME')['TOTAL_CREDITS'].sum().idxmax()
-            insights.append(f"🏭 Top consumer: {top_warehouse}")
-    
-    if 'AVG_EXECUTION_TIME' in df.columns:
-        avg_time = float(df['AVG_EXECUTION_TIME'].mean())
-        if avg_time > 30000:
-            insights.append(f"⚡ Performance issue: {format_duration(avg_time)}")
-        elif avg_time > 10000:
-            insights.append(f"⚠️ Moderate performance: {format_duration(avg_time)}")
-        else:
-            insights.append(f"✅ Good performance: {format_duration(avg_time)}")
-    
-    if 'SLOW_QUERIES' in df.columns:
-        slow_count = float(df['SLOW_QUERIES'].sum())
-        if slow_count > 0:
-            insights.append(f"🐌 {slow_count:.0f} slow queries detected")
-    
-    if 'USAGE_HOUR' in df.columns and 'TOTAL_CREDITS' in df.columns:
-        peak_hour = df.groupby('USAGE_HOUR')['TOTAL_CREDITS'].sum().idxmax()
-        insights.append(f"📊 Peak usage: Hour {peak_hour}")
-    
-    if 'USAGE_DATE' in df.columns and 'TOTAL_CREDITS' in df.columns:
-        daily_credits = df.groupby('USAGE_DATE')['TOTAL_CREDITS'].sum()
-        if len(daily_credits) > 1:
-            trend = daily_credits.iloc[-1] - daily_credits.iloc[0]
-            if trend > 0:
-                insights.append("📈 Credit consumption increasing")
-            elif trend < 0:
-                insights.append("📉 Credit consumption decreasing")
-    
-    return insights
-
-def create_visualization(df: pd.DataFrame, dimensions: List[str], metrics: List[str]) -> go.Figure:
+def create_simple_visualization(df: pd.DataFrame) -> go.Figure:
     """Create appropriate visualization based on data"""
     if df.empty:
         return go.Figure().add_annotation(text="No data available", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
     
     # Time series chart
-    if 'USAGE_DATE' in df.columns and metrics:
-        metric = metrics[0]
-        daily_data = df.groupby('USAGE_DATE')[metric].sum().reset_index()
-        fig = px.line(daily_data, x='USAGE_DATE', y=metric,
-                     title=f"{metric} Over Time",
-                     labels={metric: metric.replace('_', ' ').title()})
-        return fig
+    if 'USAGE_DATE' in df.columns:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            metric = numeric_cols[0]
+            daily_data = df.groupby('USAGE_DATE')[metric].sum().reset_index()
+            fig = px.line(daily_data, x='USAGE_DATE', y=metric,
+                         title=f"{metric} Over Time",
+                         labels={metric: metric.replace('_', ' ').title()})
+            return fig
     
     # Bar chart for categorical data
-    elif dimensions and metrics:
-        dim = dimensions[0]
-        metric = metrics[0]
-        bar_data = df.groupby(dim)[metric].sum().reset_index()
-        fig = px.bar(bar_data, x=dim, y=metric,
-                    title=f"{metric} by {dim}",
-                    labels={metric: metric.replace('_', ' ').title(), dim: dim.replace('_', ' ').title()})
+    categorical_cols = df.select_dtypes(include=['object']).columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    
+    if len(categorical_cols) > 0 and len(numeric_cols) > 0:
+        cat_col = categorical_cols[0]
+        num_col = numeric_cols[0]
+        bar_data = df.groupby(cat_col)[num_col].sum().reset_index()
+        fig = px.bar(bar_data, x=cat_col, y=num_col,
+                    title=f"{num_col} by {cat_col}",
+                    labels={num_col: num_col.replace('_', ' ').title(), cat_col: cat_col.replace('_', ' ').title()})
         return fig
     
-    # Scatter plot for two metrics
-    elif len(metrics) >= 2:
-        fig = px.scatter(df, x=metrics[0], y=metrics[1],
-                        title=f"{metrics[1]} vs {metrics[0]}",
-                        labels={metrics[0]: metrics[0].replace('_', ' ').title(),
-                               metrics[1]: metrics[1].replace('_', ' ').title()})
+    # Scatter plot for two numeric columns
+    if len(numeric_cols) >= 2:
+        fig = px.scatter(df, x=numeric_cols[0], y=numeric_cols[1],
+                        title=f"{numeric_cols[1]} vs {numeric_cols[0]}",
+                        labels={numeric_cols[0]: numeric_cols[0].replace('_', ' ').title(),
+                               numeric_cols[1]: numeric_cols[1].replace('_', ' ').title()})
         return fig
     
     # Default table view
-    else:
-        fig = go.Figure(data=[go.Table(
-            header=dict(values=list(df.columns)),
-            cells=dict(values=[df[col] for col in df.columns])
-        )])
-        return fig
+    fig = go.Figure(data=[go.Table(
+        header=dict(values=list(df.columns)),
+        cells=dict(values=[df[col] for col in df.columns])
+    )])
+    return fig
+
+
+
+
 
 def chat_interface():
     """Main chat interface with Cortex Analyst integration"""
@@ -604,6 +566,39 @@ def chat_interface():
     
     # Sidebar with connection status and quick actions
     with st.sidebar:
+        st.title("🤖 AI-Powered Queries")
+        
+        # How It Works
+        st.subheader("🔍 How It Works")
+        st.info("""
+        1. **AI Understanding**: Cortex Analyst interprets your natural language
+        2. **Smart Selection**: Automatically chooses the best semantic view
+        3. **SQL Generation**: Creates optimized SQL queries
+        4. **Enhanced Results**: Provides insights and visualizations
+        """)
+        
+        # Suggested Queries with Click Functionality
+        st.subheader("💡 Try These Questions")
+        suggested_queries = [
+            "What's our total Snowflake usage?",
+            "Which warehouses cost the most?",
+            "Show me slow queries",
+            "Who are the most active users?",
+            "Any suspicious activity?"
+        ]
+        
+        for i, query in enumerate(suggested_queries):
+            if st.button(query, key=f"suggested_{i}"):
+                st.session_state.user_input = query
+                st.rerun()
+        
+        st.markdown("---")
+        st.title("📊 Available Semantic Views")
+        semantic_views = get_available_semantic_views()
+        for view in semantic_views:
+            st.write(f"• {view}")
+        
+        st.markdown("---")
         st.title("🔧 Configuration")
         
         # Connection status
@@ -623,36 +618,6 @@ def chat_interface():
         else:
             st.markdown('<div class="status-error">❌ Cortex Analyst not configured</div>', unsafe_allow_html=True)
             return
-        
-        st.markdown("---")
-        st.title("🤖 AI-Powered Queries")
-        
-        # Natural Language Queries
-        st.subheader("Ask Anything About Your Snowflake Data")
-        st.info("💡 Try asking questions like:")
-        st.markdown("""
-        - "What's our total Snowflake usage?"
-        - "Which warehouses cost the most?"
-        - "Show me slow queries"
-        - "Who are the most active users?"
-        - "Any suspicious activity?"
-        - "What's our peak usage time?"
-        """)
-        
-        st.markdown("---")
-        st.title("📊 Available Semantic Views")
-        semantic_views = get_available_semantic_views()
-        for view in semantic_views:
-            st.write(f"• {view}")
-        
-        st.markdown("---")
-        st.title("🔍 How It Works")
-        st.info("""
-        1. **AI Understanding**: Cortex Analyst interprets your natural language
-        2. **Smart Selection**: Automatically chooses the best semantic view
-        3. **SQL Generation**: Creates optimized SQL queries
-        4. **Enhanced Results**: Provides insights and visualizations
-        """)
     
     # Main chat area
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -667,7 +632,7 @@ def chat_interface():
     if "user_input" in st.session_state and st.session_state.user_input:
         prompt = st.session_state.user_input
         # Clear the session state to prevent reprocessing
-        st.session_state.user_input = None
+        del st.session_state.user_input
     
     if prompt:
         # Add user message to chat history
@@ -689,11 +654,11 @@ def chat_interface():
                     ai_interpretation = extract_text_from_cortex_response(cortex_response)
                     generated_sql = extract_sql_from_cortex_response(cortex_response)
                     
-                    # Display AI interpretation
+                    # Display AI interpretation (only once)
                     if ai_interpretation:
                         st.markdown(f"""
                         <div class="ai-insights">
-                            <strong>🤖 AI Interpretation:</strong><br>
+                            <strong>🤖 AI Analysis:</strong><br>
                             {ai_interpretation}
                         </div>
                         """, unsafe_allow_html=True)
@@ -712,93 +677,19 @@ def chat_interface():
                             df = execute_raw_sql_query(generated_sql)
                             
                             if df is not None and not df.empty:
-                                # Generate insights
-                                insights = generate_insights(df, prompt)
-                                
-                                # Create comprehensive response
-                                response = f"✅ **Query Results:**\n\n"
-                                response += f"**Records Found:** {len(df)}\n\n"
-                                
-                                # Create concise answer first
-                                concise_answer = ""
-                                
-                                # Extract the most relevant metric for concise answer
-                                if 'TOTAL_COST' in df.columns:
-                                    total_cost = float(df['TOTAL_COST'].sum())
-                                    concise_answer = f"💰 **Total Cost:** {format_currency(total_cost)}"
-                                elif 'TOTAL_CREDITS' in df.columns:
-                                    total_credits = float(df['TOTAL_CREDITS'].sum())
-                                    concise_answer = f"💳 **Total Credits:** {total_credits:,.2f}"
-                                elif 'AVG_EXECUTION_TIME' in df.columns:
-                                    avg_time = float(df['AVG_EXECUTION_TIME'].mean())
-                                    concise_answer = f"⏱️ **Average Execution Time:** {format_duration(avg_time)}"
-                                elif 'TOTAL_QUERIES' in df.columns:
-                                    total_queries = float(df['TOTAL_QUERIES'].sum())
-                                    concise_answer = f"📊 **Total Queries:** {total_queries:,.0f}"
-                                else:
-                                    concise_answer = f"📊 **Records Found:** {len(df)}"
-                                
-                                # Display concise answer prominently
-                                st.markdown(f"""
-                                <div class="concise-answer">
-                                    {concise_answer}
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                # Create detailed response
-                                response = f"**📋 Detailed Analysis:**\n\n"
-                                
-                                # Provide comprehensive summary
-                                if 'TOTAL_COST' in df.columns:
-                                    total_cost = float(df['TOTAL_COST'].sum())
-                                    response += f"• **Total Cost:** {format_currency(total_cost)}\n"
-                                elif 'TOTAL_CREDITS' in df.columns:
-                                    total_credits = float(df['TOTAL_CREDITS'].sum())
-                                    response += f"• **Total Credits:** {total_credits:,.2f}\n"
-                                
-                                if 'AVG_EXECUTION_TIME' in df.columns:
-                                    avg_time = float(df['AVG_EXECUTION_TIME'].mean())
-                                    response += f"• **Average Execution Time:** {format_duration(avg_time)}\n"
-                                
-                                if 'TOTAL_QUERIES' in df.columns:
-                                    total_queries = float(df['TOTAL_QUERIES'].sum())
-                                    response += f"• **Total Queries:** {total_queries:,.0f}\n"
-                                
-                                if 'WAREHOUSE_NAME' in df.columns:
-                                    unique_warehouses = df['WAREHOUSE_NAME'].nunique()
-                                    response += f"• **Active Warehouses:** {unique_warehouses}\n"
-                                
-                                response += f"\n**📊 Data Summary:** Found **{len(df)}** records with the requested data.\n\n"
-                                
-                                # Show insights
-                                if insights:
-                                    response += "**🔍 AI Insights:**\n"
-                                    for insight in insights:
-                                        response += f"• {insight}\n"
-                                    response += "\n"
-                                
-                                # Display the detailed response
-                                st.markdown(response)
-                                
-                                # Show insights
-                                if insights:
-                                    st.markdown("**🔍 AI Insights:**")
-                                    for insight in insights:
-                                        st.markdown(f"• {insight}")
-                                    st.markdown("")
-                                
-                                # Create visualization if data supports it
-                                if len(df) > 1 and any(col in df.columns for col in ['TOTAL_COST', 'TOTAL_CREDITS', 'AVG_EXECUTION_TIME', 'TOTAL_QUERIES']):
-                                    st.markdown("**📈 Data Visualization:**")
-                                    fig = create_visualization(df, [], [])
-                                    st.plotly_chart(fig, use_container_width=True)
-                                
-                                # Show expanded data preview
-                                st.markdown("**📊 Data Preview:**")
+                                # Show data results
+                                st.markdown("**📊 Query Results:**")
                                 st.dataframe(df, use_container_width=True)
                                 
+                                # Create visualization if data supports it
+                                if len(df) > 1:
+                                    st.markdown("**📈 Data Visualization:**")
+                                    fig = create_simple_visualization(df)
+                                    st.plotly_chart(fig, use_container_width=True)
+                                
                                 # Add assistant response to chat history
-                                st.session_state.messages.append({"role": "assistant", "content": response})
+                                response_content = f"AI Analysis: {ai_interpretation}\n\nData: {len(df)} records found"
+                                st.session_state.messages.append({"role": "assistant", "content": response_content})
                                 
                             else:
                                 error_msg = "❌ No data found for your query. The AI-generated SQL didn't return any results."
