@@ -180,7 +180,7 @@ def get_snowflake_connection():
         st.error(f"Error connecting to Snowflake: {e}")
         return None
 
-def execute_semantic_query(dimensions: List[str], metrics: List[str], filters: Optional[str] = None, limit: int = 1000) -> Optional[pd.DataFrame]:
+def execute_semantic_query(dimensions: List[str], metrics: List[str], filters: Optional[str] = None, limit: int = 1000, semantic_view: str = "snowflake_monitoring_semantic") -> Optional[pd.DataFrame]:
     """Execute a semantic view query"""
     conn = get_snowflake_connection()
     if not conn:
@@ -193,7 +193,7 @@ def execute_semantic_query(dimensions: List[str], metrics: List[str], filters: O
         
         query = f"""
         SELECT * FROM SEMANTIC_VIEW(
-            SNOWFLAKE_MONITORING_SEMANTIC
+            {semantic_view.upper()}
             DIMENSIONS {dim_str}
             METRICS {metric_str}
         )
@@ -219,15 +219,34 @@ def execute_semantic_query(dimensions: List[str], metrics: List[str], filters: O
         return None
 
 def get_available_dimensions() -> List[str]:
-    """Get available dimensions from semantic view"""
+    """Get available dimensions from semantic views"""
     return [
-        "WAREHOUSE_NAME"  # Only dimension that's definitely available
+        "WAREHOUSE_NAME",
+        "USER_NAME", 
+        "QUERY_TYPE",
+        "WAREHOUSE_SIZE",
+        "USAGE_DATE",
+        "USAGE_HOUR"
     ]
 
 def get_available_metrics() -> List[str]:
-    """Get available metrics from semantic view"""
+    """Get available metrics from semantic views"""
     return [
-        "TOTAL_CREDITS", "TOTAL_QUERIES"  # Only metrics that are definitely available
+        "TOTAL_CREDITS", 
+        "TOTAL_QUERIES",
+        "AVG_EXECUTION_TIME",
+        "SLOW_QUERIES",
+        "TOTAL_DATA_SCANNED",
+        "AVG_QUEUE_TIME",
+        "TOTAL_COST",
+        "AVG_DAILY_COST",
+        "COMPUTE_VS_CLOUD_RATIO",
+        "HIGH_COST_DAYS",
+        "TOTAL_USER_QUERIES",
+        "AVG_USER_EXECUTION_TIME",
+        "USER_DATA_ACCESS",
+        "SUSPICIOUS_ACTIVITY",
+        "LONG_RUNNING_QUERIES"
     ]
 
 def format_currency(value: float) -> str:
@@ -259,24 +278,104 @@ def parse_natural_language_query(query: str) -> Dict[str, Any]:
         'dimensions': [],
         'metrics': [],
         'filters': None,
-        'time_period': '7d'
+        'time_period': '7d',
+        'semantic_view': 'snowflake_monitoring_semantic'
     }
     
-    # Extract dimensions based on keywords
+    # Determine semantic view based on query type
+    # Check for specific phrases first
+    if 'performance analysis' in query_lower:
+        params['semantic_view'] = 'query_performance_semantic'
+    elif 'cost analysis' in query_lower:
+        params['semantic_view'] = 'cost_analysis_semantic'
+    elif 'query performance' in query_lower:
+        params['semantic_view'] = 'query_performance_semantic'
+    elif 'user activity' in query_lower:
+        params['semantic_view'] = 'user_activity_semantic'
+    elif 'avg timing' in query_lower or 'average timing' in query_lower:
+        params['semantic_view'] = 'query_performance_semantic'
+    elif 'query metrics' in query_lower:
+        params['semantic_view'] = 'query_performance_semantic'
+    # Then check for individual keywords
+    elif any(word in query_lower for word in ['performance', 'slow', 'execution', 'time', 'timing']):
+        params['semantic_view'] = 'query_performance_semantic'
+    elif any(word in query_lower for word in ['cost', 'spend', 'expense', 'money', 'billing']):
+        params['semantic_view'] = 'cost_analysis_semantic'
+    elif any(word in query_lower for word in ['user', 'activity', 'who', 'person']):
+        params['semantic_view'] = 'user_activity_semantic'
+    elif any(word in query_lower for word in ['resource', 'utilization', 'efficiency', 'usage']):
+        params['semantic_view'] = 'resource_utilization_semantic'
+    elif any(word in query_lower for word in ['security', 'access', 'suspicious', 'audit']):
+        params['semantic_view'] = 'security_monitoring_semantic'
+    
+    # Extract dimensions based on keywords and semantic view
     if 'warehouse' in query_lower:
         params['dimensions'].append('WAREHOUSE_NAME')
+    if 'user' in query_lower:
+        params['dimensions'].append('USER_NAME')
+    if 'type' in query_lower or 'query type' in query_lower:
+        params['dimensions'].append('QUERY_TYPE')
+    if 'date' in query_lower or 'time' in query_lower:
+        params['dimensions'].append('USAGE_DATE')
     
     # Extract metrics based on keywords
     if 'cost' in query_lower or 'spend' in query_lower or 'expense' in query_lower or 'credits' in query_lower:
-        params['metrics'].append('TOTAL_CREDITS')
+        if params['semantic_view'] == 'cost_analysis_semantic':
+            params['metrics'].append('TOTAL_COST')
+        else:
+            params['metrics'].append('TOTAL_CREDITS')
     if 'query' in query_lower and ('count' in query_lower or 'number' in query_lower):
         params['metrics'].append('TOTAL_QUERIES')
+    if any(word in query_lower for word in ['avg', 'average', 'mean']) and any(word in query_lower for word in ['time', 'timing', 'execution']):
+        if params['semantic_view'] == 'query_performance_semantic':
+            params['metrics'].append('AVG_EXECUTION_TIME')
+        elif params['semantic_view'] == 'user_activity_semantic':
+            params['metrics'].append('AVG_USER_EXECUTION_TIME')
+        else:
+            params['metrics'].append('AVG_EXECUTION_TIME')
+    elif 'performance' in query_lower or 'execution' in query_lower or 'time' in query_lower:
+        params['metrics'].append('AVG_EXECUTION_TIME')
+    if 'slow' in query_lower:
+        params['metrics'].append('SLOW_QUERIES')
+    if 'data' in query_lower and 'scan' in query_lower:
+        params['metrics'].append('TOTAL_DATA_SCANNED')
+    if 'activity' in query_lower:
+        params['metrics'].append('TOTAL_USER_QUERIES')
+    if 'security' in query_lower or 'suspicious' in query_lower:
+        params['metrics'].append('SUSPICIOUS_ACTIVITY')
     
     # Set default dimensions and metrics if none specified
     if not params['dimensions']:
-        params['dimensions'] = ['WAREHOUSE_NAME']
+        if params['semantic_view'] == 'user_activity_semantic':
+            params['dimensions'] = ['USER_NAME']
+        elif params['semantic_view'] == 'query_performance_semantic':
+            params['dimensions'] = ['QUERY_TYPE']
+        elif params['semantic_view'] == 'cost_analysis_semantic':
+            params['dimensions'] = ['WAREHOUSE_NAME']
+        elif params['semantic_view'] == 'resource_utilization_semantic':
+            params['dimensions'] = ['WAREHOUSE_NAME']
+        elif params['semantic_view'] == 'security_monitoring_semantic':
+            params['dimensions'] = ['USER_NAME']
+        else:
+            params['dimensions'] = ['WAREHOUSE_NAME']
+    
     if not params['metrics']:
-        params['metrics'] = ['TOTAL_CREDITS', 'TOTAL_QUERIES']
+        if params['semantic_view'] == 'user_activity_semantic':
+            params['metrics'] = ['TOTAL_USER_QUERIES', 'AVG_USER_EXECUTION_TIME']
+        elif params['semantic_view'] == 'query_performance_semantic':
+            params['metrics'] = ['TOTAL_QUERIES', 'AVG_EXECUTION_TIME']
+        elif params['semantic_view'] == 'cost_analysis_semantic':
+            params['metrics'] = ['TOTAL_COST', 'AVG_DAILY_COST']
+        elif params['semantic_view'] == 'resource_utilization_semantic':
+            params['metrics'] = ['TOTAL_CREDITS_USED', 'AVG_CREDITS_PER_HOUR']
+        elif params['semantic_view'] == 'security_monitoring_semantic':
+            params['metrics'] = ['TOTAL_USER_ACTIVITY', 'SUSPICIOUS_ACTIVITY']
+        else:
+            params['metrics'] = ['TOTAL_CREDITS', 'TOTAL_QUERIES']
+    
+    # Ensure we have at least one metric that exists in the semantic view
+    if not params['metrics']:
+        params['metrics'] = ['TOTAL_QUERIES']  # Fallback metric
     
     return params
 
@@ -304,6 +403,17 @@ def generate_insights(df: pd.DataFrame, query: str) -> List[str]:
         avg_time = df['AVG_EXECUTION_TIME'].mean()
         if avg_time > 30000:  # 30 seconds
             insights.append(f"⚡ **Performance Issue**: Average execution time is {format_duration(avg_time)}")
+        elif avg_time > 10000:  # 10 seconds
+            insights.append(f"⚠️ **Moderate Performance**: Average execution time is {format_duration(avg_time)}")
+        else:
+            insights.append(f"✅ **Good Performance**: Average execution time is {format_duration(avg_time)}")
+        
+        # Query type specific insights
+        if 'QUERY_TYPE' in df.columns:
+            query_performance = df.groupby('QUERY_TYPE')['AVG_EXECUTION_TIME'].mean().sort_values(ascending=False)
+            slowest_type = query_performance.index[0]
+            slowest_time = query_performance.iloc[0]
+            insights.append(f"🔍 **Slowest Query Type**: {slowest_type} queries take {format_duration(slowest_time)} on average")
     
     if 'SLOW_QUERIES' in df.columns:
         slow_count = df['SLOW_QUERIES'].sum()
@@ -399,7 +509,11 @@ def chat_interface():
             "What's the average query execution time?",
             "Show me user activity by hour",
             "Which query types are most common?",
-            "What's the cost trend over the last month?"
+            "What's the cost trend over the last month?",
+            "Show me user performance analysis",
+            "Which users have the most suspicious activity?",
+            "What's the resource utilization by warehouse?",
+            "Show me slow query performance"
         ]
         
         for query in quick_queries:
@@ -425,8 +539,14 @@ def chat_interface():
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
     
-    # Chat input
-    if prompt := st.chat_input("Ask me anything about your Snowflake usage..."):
+    # Check for quick action input or chat input
+    prompt = None
+    if "user_input" in st.session_state and st.session_state.user_input:
+        prompt = st.session_state.user_input
+        # Clear the session state to prevent reprocessing
+        st.session_state.user_input = None
+    
+    if prompt:
         # Add user message to chat history
         st.session_state.messages.append({"role": "user", "content": prompt})
         
@@ -441,24 +561,68 @@ def chat_interface():
                 params = parse_natural_language_query(prompt)
                 
                 # Execute semantic query
-                df = execute_semantic_query(
-                    dimensions=params['dimensions'],
-                    metrics=params['metrics'],
-                    filters=params['filters']
-                )
+                try:
+                    df = execute_semantic_query(
+                        dimensions=params['dimensions'],
+                        metrics=params['metrics'],
+                        filters=params['filters'],
+                        semantic_view=params['semantic_view']
+                    )
+                except Exception as e:
+                    st.error(f"Error executing query: {e}")
+                    # Try with fallback metrics
+                    st.info("Trying with fallback metrics...")
+                    fallback_metrics = ['TOTAL_QUERIES'] if 'TOTAL_QUERIES' in get_available_metrics() else ['TOTAL_CREDITS']
+                    df = execute_semantic_query(
+                        dimensions=params['dimensions'],
+                        metrics=fallback_metrics,
+                        filters=params['filters'],
+                        semantic_view=params['semantic_view']
+                    )
                 
                 if df is not None and not df.empty:
                     # Generate insights
                     insights = generate_insights(df, prompt)
                     
-                    # Display results
-                    st.success(f"✅ Found {len(df)} records")
+                    # Create comprehensive response
+                    response = f"✅ **Query Results:**\n\n"
+                    response += f"**Semantic View:** {params['semantic_view'].replace('_', ' ').title()}\n"
+                    response += f"**Dimensions:** {', '.join(params['dimensions'])}\n"
+                    response += f"**Metrics:** {', '.join(params['metrics'])}\n"
+                    response += f"**Records:** {len(df)}\n\n"
+                    
+                    # Add concise answer based on the query type
+                    if 'avg' in prompt.lower() or 'average' in prompt.lower() or 'timing' in prompt.lower():
+                        if 'AVG_EXECUTION_TIME' in params['metrics']:
+                            avg_time = df['AVG_EXECUTION_TIME'].mean()
+                            response += f"**📊 Answer:** The average execution time across all query types is **{format_duration(avg_time)}**.\n\n"
+                        elif 'AVG_USER_EXECUTION_TIME' in params['metrics']:
+                            avg_time = df['AVG_USER_EXECUTION_TIME'].mean()
+                            response += f"**📊 Answer:** The average user execution time is **{format_duration(avg_time)}**.\n\n"
+                    elif 'cost' in prompt.lower() or 'spend' in prompt.lower():
+                        if 'TOTAL_COST' in params['metrics']:
+                            total_cost = df['TOTAL_COST'].sum()
+                            response += f"**📊 Answer:** Total cost is **${total_cost:,.2f}**.\n\n"
+                        elif 'TOTAL_CREDITS' in params['metrics']:
+                            total_credits = df['TOTAL_CREDITS'].sum()
+                            response += f"**📊 Answer:** Total credits consumed is **{total_credits:,.2f}** (${total_credits * 0.0004:.2f}).\n\n"
+                    elif 'query' in prompt.lower() and ('count' in prompt.lower() or 'number' in prompt.lower()):
+                        if 'TOTAL_QUERIES' in params['metrics']:
+                            total_queries = df['TOTAL_QUERIES'].sum()
+                            response += f"**📊 Answer:** Total number of queries is **{total_queries:,.0f}**.\n\n"
+                    else:
+                        # Generic answer
+                        response += f"**📊 Answer:** Found **{len(df)}** records with the requested data.\n\n"
                     
                     # Show insights
                     if insights:
-                        st.markdown("**🔍 AI Insights:**")
+                        response += "**🔍 AI Insights:**\n"
                         for insight in insights:
-                            st.markdown(f"• {insight}")
+                            response += f"• {insight}\n"
+                        response += "\n"
+                    
+                    # Display the response
+                    st.markdown(response)
                     
                     # Create visualization
                     fig = create_visualization(df, params['dimensions'], params['metrics'])
@@ -469,14 +633,6 @@ def chat_interface():
                         st.dataframe(df.head(10), use_container_width=True)
                     
                     # Add assistant response to chat history
-                    response = f"✅ **Query Results:**\n\n"
-                    response += f"**Dimensions:** {', '.join(params['dimensions'])}\n"
-                    response += f"**Metrics:** {', '.join(params['metrics'])}\n"
-                    response += f"**Records:** {len(df)}\n\n"
-                    response += "**Key Insights:**\n"
-                    for insight in insights:
-                        response += f"• {insight}\n"
-                    
                     st.session_state.messages.append({"role": "assistant", "content": response})
                     
                 else:
@@ -484,7 +640,13 @@ def chat_interface():
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
     
+    # Always show chat input at the end
     st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Chat input box - always visible
+    if prompt := st.chat_input("Ask me anything about your Snowflake usage...", key="main_chat_input"):
+        st.session_state.user_input = prompt
+        st.rerun()
 
 def dashboard_view():
     """Traditional dashboard view"""
