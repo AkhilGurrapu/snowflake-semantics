@@ -1,273 +1,280 @@
-# ❄️ Snowflake Semantic Analytics - Complete Documentation
+# Snowflake Semantic Analytics Documentation
 
-## 🎯 Overview
+## Overview
 
-A production-ready Streamlit application that leverages Snowflake semantic views to provide business users with natural language querying capabilities for Snowflake monitoring and analytics.
+This documentation covers the Snowflake Semantic Analytics platform with **Cortex Analyst integration**, providing AI-powered natural language query capabilities for business intelligence.
 
-## 🚀 Quick Start
+## Architecture
 
-### Prerequisites
-- Python 3.8+
-- Snowflake account with semantic views
-- Snowflake CLI (`snow`) configured
-- Programmatic Access Token
-
-### Installation & Run
-```bash
-# 1. Install dependencies
-cd streamlit_app
-pip install -r requirements.txt
-
-# 2. Test connection
-snow --config-file=config.toml connection test -c semantics
-
-# 3. Run the app
-python app.py
-# OR
-streamlit run app.py
+### Previous Architecture (Keyword Matching)
+```
+User Query → Keyword Matching → Semantic View Selection → SQL Generation → Results
 ```
 
-**Access**: http://localhost:8501
+### Current Architecture (Cortex Analyst)
+```
+User Query → Cortex Analyst → Semantic View Selection → Semantic View Query → Enhanced Results
+```
 
-## 💬 Features
+## Core Components
 
-### Natural Language Chat Interface
-- Ask questions in plain English: "Show me warehouse costs"
-- AI-powered insights generation
-- Real-time data visualization
-- Conversation history
+### 1. Cortex Analyst Integration
 
-### Traditional Dashboard
-- Key performance indicators
-- Interactive charts and graphs
-- Real-time metrics display
-- Mobile-responsive design
+The application now uses Snowflake's Cortex Analyst REST API to:
+- **Understand natural language queries** using AI
+- **Automatically select the most appropriate semantic view**
+- **Generate optimized SQL queries**
+- **Provide AI-powered interpretations**
 
-### Available Queries
-- "Show me warehouse costs"
+#### API Endpoint
+- **URL**: `https://{account}.snowflakecomputing.com/api/v2/cortex/analyst/message`
+- **Method**: POST
+- **Authentication**: Bearer token (Programmatic Access Token)
+
+#### Request Structure
+```json
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What's the total cost of our Snowflake usage?"
+        }
+      ]
+    }
+  ],
+  "semantic_models": [
+    {"semantic_view": "DATABASE.SCHEMA.snowflake_monitoring_semantic"},
+    {"semantic_view": "DATABASE.SCHEMA.cost_analysis_semantic"},
+    {"semantic_view": "DATABASE.SCHEMA.query_performance_semantic"}
+  ],
+  "stream": false
+}
+```
+
+#### Response Structure
+```json
+{
+  "request_id": "75d343ee-699c-483f-83a1-e314609fb563",
+  "message": {
+    "role": "analyst",
+    "content": [
+      {
+        "type": "text",
+        "text": "I'll help you find the total cost of your Snowflake usage..."
+      },
+      {
+        "type": "sql",
+        "statement": "SELECT SUM(TOTAL_COST) FROM SEMANTIC_VIEW(...)",
+        "confidence": {
+          "verified_query_used": null
+        }
+      }
+    ]
+  }
+}
+```
+
+### 2. Core Functions
+
+#### `call_cortex_analyst_api(user_query, semantic_views)`
+- Makes HTTP POST request to Cortex Analyst API
+- Handles authentication and error management
+- Returns structured response with AI interpretation and SQL
+
+#### `extract_sql_from_cortex_response(cortex_response)`
+- Parses Cortex Analyst response to extract generated SQL
+- Handles different response formats
+- Returns SQL statement for execution
+
+#### `extract_text_from_cortex_response(cortex_response)`
+- Extracts AI interpretation text from response
+- Provides user-friendly explanation of what the AI understood
+
+#### `execute_raw_sql_query(sql_query)`
+- Executes the AI-generated SQL directly
+- Returns pandas DataFrame with results
+- Handles execution errors gracefully
+
+### 3. Semantic Views
+
+The application supports multiple semantic views:
+- `snowflake_monitoring_semantic` - General monitoring
+- `query_performance_semantic` - Performance analysis
+- `cost_analysis_semantic` - Cost and billing
+- `user_activity_semantic` - User behavior
+- `resource_utilization_semantic` - Resource usage
+- `security_monitoring_semantic` - Security and access
+
+## User Experience
+
+### 1. AI-Powered Query Understanding
+- Users can ask questions in natural language
+- No need to know technical details about semantic views
+- AI automatically selects the best semantic view
+
+### 2. Transparent Process
+- Shows AI interpretation of the query
+- Displays generated SQL for transparency
+- Provides confidence information
+
+### 3. Enhanced Results
+- AI-generated insights from the data
+- Automatic visualization selection
+- Contextual answers based on query type
+
+### 4. Suggested Questions
+The application includes pre-built questions that work well with Cortex Analyst:
+- "What's the total cost of our Snowflake usage?"
 - "Which warehouses are consuming the most credits?"
-- "What's the total number of queries?"
-- "Show me warehouse usage breakdown"
+- "Show me the average query execution time by warehouse"
+- "Who are the most active users?"
+- "What's the cost trend over the last month?"
 
-## 🏗️ Architecture
+## Configuration Requirements
 
-```
-User Interface (Streamlit)
-    ↓
-Natural Language Processing
-    ↓
-Semantic Query Translation
-    ↓
-Snowflake Semantic Views
-    ↓
-Raw Data (Account Usage Views)
-```
+### 1. Authentication
+- Valid Snowflake Programmatic Access Token
+- Token stored in `snowflake-pat.token` file
+- Proper role permissions (SNOWFLAKE.CORTEX_USER)
 
-### Technology Stack
-- **Frontend**: Streamlit (Python)
-- **Database**: Snowflake
-- **Semantic Layer**: Snowflake Semantic Views
-- **Visualization**: Plotly
-- **Authentication**: Snowflake Programmatic Access Token
+### 2. Semantic Views
+- All semantic views must be created and accessible
+- Proper permissions on semantic views
+- Valid database and schema configuration
 
-## 📊 Semantic View Structure
+### 3. Network Access
+- HTTPS access to Snowflake REST API
+- Proper firewall configuration
+- Valid account URL format
 
-### Current Semantic View: `SNOWFLAKE_MONITORING_SEMANTIC`
+## Error Handling
 
-#### Available Dimensions
-- `WAREHOUSE_NAME`: Warehouse identification
+### 1. API Connection Errors
+- Graceful fallback with user-friendly messages
+- Connection status indicators
+- Retry mechanisms for transient failures
 
-#### Available Metrics
-- `TOTAL_CREDITS`: Total credits consumed
-- `TOTAL_QUERIES`: Total number of queries executed
+### 2. SQL Generation Errors
+- Clear error messages when AI can't generate SQL
+- Suggestions for rephrasing queries
+- Fallback to traditional semantic view queries
 
-#### Base Tables
-- `WAREHOUSE_USAGE_BASE`: Warehouse usage data
-- `QUERY_PERFORMANCE_BASE`: Query performance metrics
-- `WAREHOUSE_DIMENSION`: Warehouse metadata
-- `COST_ANALYSIS_BASE`: Cost analysis data
+### 3. Execution Errors
+- Detailed error reporting
+- Suggestions for query modification
+- Data validation and sanitization
 
-## 🔧 Configuration
+## Benefits
 
-### config.toml
-```toml
-[connections.semantics]
-account = "YOUR_ACCOUNT"
-user = "YOUR_USER"
-authenticator = "PROGRAMMATIC_ACCESS_TOKEN"
-token_file_path = "snowflake-pat.token"
-role = "ACCOUNTADMIN"
-warehouse = "COMPUTE_WH"
-database = "SNOWFLAKE_MONITORING"
-schema = "MONITORING_SEMANTIC"
-```
+### 1. Improved User Experience
+- **Natural Language**: No technical knowledge required
+- **Intelligent Selection**: AI chooses the best semantic view
+- **Contextual Understanding**: AI understands business context
 
-### Authentication
-- Place your Snowflake Personal Access Token in `snowflake-pat.token`
-- Ensure proper role permissions for semantic view access
+### 2. Enhanced Accuracy
+- **AI-Powered**: Better understanding than keyword matching
+- **Semantic Understanding**: Grasps intent, not just keywords
+- **Multi-turn Conversations**: Supports follow-up questions
 
-## 📈 Business Value
+### 3. Better Insights
+- **AI Interpretation**: Explains what the AI understood
+- **Generated SQL**: Shows the actual query being executed
+- **Enhanced Analytics**: AI-powered insights from results
 
-### Cost Management
-- Real-time credit consumption monitoring
-- Warehouse cost breakdown and analysis
-- Cost optimization recommendations
-- Anomaly detection for unusual spending
+### 4. Scalability
+- **Multiple Views**: Supports all semantic views automatically
+- **Extensible**: Easy to add new semantic views
+- **Maintainable**: Centralized AI logic
 
-### Performance Monitoring
-- Query volume tracking
-- Warehouse usage patterns
-- Performance trend analysis
-- Resource utilization insights
+## Testing and Validation
 
-### Operational Efficiency
-- Self-service analytics for business users
-- Natural language interface (no SQL required)
-- Real-time insights and decision support
-- Automated reporting and visualization
+### 1. Test Queries
+The following queries have been tested and work well:
+- Cost analysis queries
+- Performance monitoring queries
+- User activity queries
+- Resource utilization queries
+- Security monitoring queries
 
-## 🔍 AI-Powered Features
+### 2. Validation Process
+1. **API Connection**: Verify Cortex Analyst API access
+2. **Token Authentication**: Ensure proper authentication
+3. **Semantic View Access**: Confirm all views are accessible
+4. **Query Processing**: Test natural language understanding
+5. **SQL Generation**: Validate generated SQL correctness
+6. **Result Processing**: Verify data retrieval and visualization
 
-### Natural Language Processing
-- Query parsing and understanding
-- Context awareness
-- Smart suggestions
+## Future Enhancements
 
-### Automated Insights
-- Anomaly detection
-- Trend analysis
-- Optimization recommendations
+### 1. Streaming Responses
+- Implement real-time streaming for long-running queries
+- Show progress indicators during processing
+- Provide incremental results
 
-### Smart Visualizations
-- Automatic chart selection
-- Interactive elements
-- Responsive design
+### 2. Multi-turn Conversations
+- Support follow-up questions
+- Maintain conversation context
+- Enable complex analytical workflows
 
-## 🛡️ Security
+### 3. Advanced Analytics
+- Integrate with Cortex Search for enhanced retrieval
+- Add predictive analytics capabilities
+- Implement anomaly detection
 
-### Authentication & Authorization
-- Token-based authentication
-- Role-based permissions
-- Connection encryption
+### 4. Custom Instructions
+- Allow users to customize AI behavior
+- Support domain-specific terminology
+- Enable personalized query preferences
 
-### Data Protection
-- No data storage (real-time queries)
-- Audit logging
-- Privacy compliance
+## Troubleshooting
 
-## 🚀 Deployment Options
+### Common Issues
 
-### 1. Local Development
-```bash
-python app.py
-```
+1. **Authentication Errors**
+   - Verify token is valid and not expired
+   - Check role permissions (SNOWFLAKE.CORTEX_USER)
+   - Ensure proper token format
+   - **Important**: Use only `Authorization: Bearer {token}` header, do not include `X-Snowflake-Authorization-Token-Type: OAuth`
 
-### 2. Streamlit Cloud
-- Deploy directly to Streamlit Cloud
-- Automatic scaling and monitoring
+2. **Cortex Analyst API 401 Errors**
+   - Grant the CORTEX_USER role: `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ACCOUNTADMIN;`
+   - Ensure semantic views exist and are accessible
+   - Verify the API endpoint is correct for your region
 
-### 3. Docker
-```dockerfile
-FROM python:3.9-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-EXPOSE 8501
-CMD ["streamlit", "run", "app.py"]
-```
+2. **API Connection Issues**
+   - Verify network connectivity
+   - Check account URL format
+   - Confirm firewall settings
 
-### 4. Enterprise
-- Kubernetes deployment
-- Load balancing
-- High availability
+3. **Semantic View Errors**
+   - Verify semantic views exist and are accessible
+   - Check database and schema permissions
+   - Validate semantic view definitions
 
-## 🔮 Future Enhancements
+4. **SQL Generation Failures**
+   - Try rephrasing the query
+   - Use more specific language
+   - Check if the question is within scope of available data
 
-### Immediate Opportunities
-1. **Cortex Analyst Integration**: Direct Snowflake AI integration
-2. **Additional Dimensions**: Time-based analysis (USAGE_DATE, USAGE_HOUR)
-3. **Advanced Metrics**: Performance metrics (AVG_EXECUTION_TIME, SLOW_QUERIES)
-4. **User Management**: Multi-user support and role-based access
+### Debug Information
 
-### Advanced Features
-1. **Predictive Analytics**: Cost forecasting and trend prediction
-2. **Automated Alerts**: Proactive cost and performance monitoring
-3. **API Access**: REST API for programmatic access
-4. **Mobile App**: Native mobile application
+The application provides detailed debug information:
+- API response codes and messages
+- Generated SQL statements
+- Error stack traces
+- Connection status indicators
 
-## 📊 Testing Results
+## Conclusion
 
-### Verified Functionality
-- ✅ Natural language querying
-- ✅ Real-time data visualization
-- ✅ Snowflake semantic view integration
-- ✅ AI-powered insights generation
-- ✅ Responsive, modern UI
-- ✅ Error handling and recovery
+The Cortex Analyst integration represents a significant improvement over the previous keyword-matching approach. It provides:
 
-### Performance Metrics
-- **Query Response Time**: < 2 seconds
-- **Data Volume**: 5+ warehouse records
-- **Visualization**: Instant chart generation
-- **Error Rate**: 0% for valid queries
+- **Better User Experience**: Natural language queries
+- **Improved Accuracy**: AI-powered understanding
+- **Enhanced Transparency**: Visible AI interpretation and SQL
+- **Greater Flexibility**: Support for complex queries
+- **Future-Proof Architecture**: Built for extensibility
 
-## 🎯 Success Criteria Met
-
-### Original Requirements
-- ✅ Single production app (no test/simple versions)
-- ✅ Chat UI for natural language queries
-- ✅ Semantic views integration
-- ✅ AI integration ready
-- ✅ Business user focus
-- ✅ Visualization capabilities
-
-### Technical Requirements
-- ✅ Playwright browser testing
-- ✅ Snowflake CLI integration
-- ✅ Robust error handling
-- ✅ Production-ready code
-
-### Business Requirements
-- ✅ Cost management
-- ✅ Performance tracking
-- ✅ User experience
-- ✅ Self-service capabilities
-
-## 📚 File Structure
-
-```
-semanticSnowflake/
-├── README.md                    # Original requirements
-├── DOCUMENTATION.md             # This comprehensive guide
-├── app.py                   # Application launcher
-├── config.toml                  # Snowflake configuration
-├── snowflake-pat.token          # Authentication token
-└── streamlit_app/
-    ├── app.py                   # Main application
-    └── requirements.txt         # Python dependencies
-```
-
-## 🏆 Production Status
-
-### ✅ **COMPLETE AND PRODUCTION-READY**
-
-The solution successfully delivers:
-1. **Addresses All Challenges**: Cost management, performance monitoring, data governance
-2. **Provides Business Value**: Real-time insights, cost optimization, operational efficiency
-3. **Leverages Modern Technology**: Semantic views, natural language processing, AI integration
-4. **Ensures User Experience**: Intuitive interface, no SQL required, real-time results
-5. **Maintains Production Standards**: Security, error handling, scalability, documentation
-
-### 🚀 **Ready for Deployment**
-
-- **Local Development**: Immediate use with `python app.py`
-- **Streamlit Cloud**: Direct deployment
-- **Enterprise**: Docker, Kubernetes, or cloud platforms
-- **Production**: Full production environment with monitoring
-
----
-
-**Implementation Completed**: August 11, 2025  
-**Status**: ✅ Production Ready  
-**Version**: 1.0.0
+This implementation successfully demonstrates how to leverage Snowflake's AI capabilities to create a more intelligent and user-friendly analytics interface.

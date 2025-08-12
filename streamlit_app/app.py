@@ -15,65 +15,173 @@ import time
 import requests
 from typing import List, Dict, Any, Optional
 import re
+import base64
 
 # Page configuration
 st.set_page_config(
-    page_title="Snowflake Semantic Analytics - Business Intelligence Chat",
+    page_title="Snowflake Semantic Analytics - AI-Powered Business Intelligence",
     page_icon="❄️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for modern chat interface
+# Custom CSS for modern, clean interface
 st.markdown("""
 <style>
+    /* Dark theme with clean design */
+    .main {
+        background-color: #1a1a1a !important;
+        color: #ffffff !important;
+    }
+    
+    .stApp {
+        background-color: #1a1a1a !important;
+    }
+    
     .main-header {
         font-size: 2.5rem;
         font-weight: bold;
-        background: linear-gradient(90deg, #1f77b4, #ff7f0e);
+        background: linear-gradient(90deg, #00d4ff, #0099cc);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         text-align: center;
         margin-bottom: 2rem;
+        padding: 1rem 0;
     }
     
+    /* Clean chat container */
     .chat-container {
-        background: #f8f9fa;
-        border-radius: 15px;
-        padding: 20px;
+        background: #2d2d2d;
+        border-radius: 12px;
+        padding: 24px;
         margin: 20px 0;
-        border: 1px solid #e9ecef;
+        border: 1px solid #404040;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
     
+    /* User message styling */
     .user-message {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        padding: 15px;
-        border-radius: 20px 20px 5px 20px;
-        margin: 10px 0;
-        max-width: 80%;
+        padding: 16px 20px;
+        border-radius: 18px 18px 4px 18px;
+        margin: 12px 0;
+        max-width: 85%;
         margin-left: auto;
+        font-size: 16px;
+        line-height: 1.4;
     }
     
+    /* Assistant message styling */
     .assistant-message {
-        background: white;
-        color: #333;
-        padding: 15px;
-        border-radius: 20px 20px 20px 5px;
-        margin: 10px 0;
-        max-width: 80%;
-        border: 1px solid #e9ecef;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        background: #3a3a3a;
+        color: #ffffff;
+        padding: 20px;
+        border-radius: 18px 18px 18px 4px;
+        margin: 12px 0;
+        max-width: 85%;
+        border: 1px solid #404040;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
     }
     
+    /* Concise answer styling */
+    .concise-answer {
+        background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+        color: white;
+        padding: 20px;
+        border-radius: 12px;
+        margin: 16px 0;
+        font-size: 18px;
+        font-weight: 600;
+        text-align: center;
+        box-shadow: 0 4px 12px rgba(0,212,255,0.3);
+    }
+    
+    /* SQL dropdown styling */
+    .sql-dropdown {
+        background: #2a2a2a;
+        border: 1px solid #404040;
+        border-radius: 8px;
+        margin: 12px 0;
+    }
+    
+    .sql-content {
+        background: #1e1e1e;
+        color: #00ff00;
+        padding: 16px;
+        border-radius: 6px;
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+        font-size: 14px;
+        line-height: 1.5;
+        border: 1px solid #404040;
+        margin: 8px 0;
+    }
+    
+    /* Chart container */
+    .chart-container {
+        background: #2d2d2d;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        margin: 16px 0;
+        border: 1px solid #404040;
+    }
+    
+    /* Data preview styling */
+    .data-preview {
+        background: #2d2d2d;
+        border-radius: 12px;
+        padding: 20px;
+        margin: 16px 0;
+        border: 1px solid #404040;
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        border-radius: 25px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        font-weight: 600;
+        font-size: 14px;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(102,126,234,0.4);
+    }
+    
+    /* Input styling */
+    .stTextInput > div > div > input {
+        border-radius: 25px;
+        border: 2px solid #404040;
+        padding: 14px 20px;
+        background: #2d2d2d;
+        color: #ffffff;
+        font-size: 16px;
+    }
+    
+    /* Sidebar styling */
+    .css-1d391kg {
+        background-color: #2d2d2d !important;
+    }
+    
+    .sidebar .sidebar-content {
+        background-color: #2d2d2d;
+        color: #ffffff;
+    }
+    
+    /* Metric cards */
     .metric-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 1.5rem;
-        border-radius: 15px;
+        border-radius: 12px;
         color: white;
         text-align: center;
         margin: 0.5rem 0;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 12px rgba(102,126,234,0.3);
     }
     
     .metric-value {
@@ -87,56 +195,56 @@ st.markdown("""
         opacity: 0.9;
     }
     
-    .chart-container {
-        background: white;
-        border-radius: 15px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        margin: 1rem 0;
-        border: 1px solid #e9ecef;
-    }
-    
-    .stTextInput > div > div > input {
-        border-radius: 25px;
-        border: 2px solid #e9ecef;
-        padding: 12px 20px;
-    }
-    
-    .stButton > button {
-        border-radius: 25px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        padding: 12px 30px;
-        font-weight: bold;
-    }
-    
-    .sidebar .sidebar-content {
-        background-color: #f8f9fa;
-    }
-    
-    .insight-card {
+    /* AI insights styling */
+    .ai-insights {
         background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
-        padding: 1rem;
+        padding: 16px;
         border-radius: 10px;
-        margin: 0.5rem 0;
+        margin: 12px 0;
         border-left: 4px solid #ff7f0e;
+        color: #333;
     }
     
-    .warning-card {
-        background: linear-gradient(135deg, #ffeaa7 0%, #fab1a0 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        border-left: 4px solid #e17055;
-    }
-    
-    .success-card {
+    /* Status indicators */
+    .status-success {
         background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        border-left: 4px solid #2ecc71;
+        color: #2d5a2d;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-weight: 600;
+        font-size: 14px;
+    }
+    
+    .status-error {
+        background: linear-gradient(135deg, #ffeaa7 0%, #fab1a0 100%);
+        color: #d63031;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-weight: 600;
+        font-size: 14px;
+    }
+    
+    /* Hide Streamlit elements */
+    .stDeployButton {
+        display: none;
+    }
+    
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    
+    ::-webkit-scrollbar-track {
+        background: #2d2d2d;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+        background: #667eea;
+        border-radius: 4px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+        background: #764ba2;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -180,6 +288,106 @@ def get_snowflake_connection():
         st.error(f"Error connecting to Snowflake: {e}")
         return None
 
+def get_cortex_analyst_token():
+    """Get authentication token for Cortex Analyst API"""
+    config = load_config()
+    if not config:
+        return None
+    
+    try:
+        # Read token from file
+        token_path = Path("/Users/akhilgurrapu/Documents/Projects/semanticSnowflake/snowflake-pat.token")
+        with open(token_path, 'r') as f:
+            token = f.read().strip()
+        
+        return token
+    except Exception as e:
+        st.error(f"Error reading token: {e}")
+        return None
+
+def call_cortex_analyst_api(user_query: str, semantic_views: List[str]) -> Dict[str, Any]:
+    """
+    Call Cortex Analyst REST API to understand user query and generate SQL
+    """
+    token = get_cortex_analyst_token()
+    if not token:
+        return None
+    
+    config = load_config()
+    if not config:
+        return None
+    
+    # Prepare the request payload
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_query
+                    }
+                ]
+            }
+        ],
+        "semantic_models": [
+            {"semantic_view": f"{config['database']}.{config['schema']}.{view}"} 
+            for view in semantic_views
+        ],
+        "stream": False
+    }
+    
+    # Prepare headers
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Make the API call
+    try:
+        url = f"https://{config['account']}.snowflakecomputing.com/api/v2/cortex/analyst/message"
+        
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Cortex Analyst API error: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error calling Cortex Analyst API: {e}")
+        return None
+
+def extract_sql_from_cortex_response(cortex_response: Dict[str, Any]) -> Optional[str]:
+    """Extract SQL statement from Cortex Analyst response"""
+    try:
+        if 'message' in cortex_response and 'content' in cortex_response['message']:
+            for content in cortex_response['message']['content']:
+                if content.get('type') == 'sql' and 'statement' in content:
+                    return content['statement']
+        return None
+    except Exception as e:
+        st.error(f"Error extracting SQL from Cortex response: {e}")
+        return None
+
+def extract_text_from_cortex_response(cortex_response: Dict[str, Any]) -> Optional[str]:
+    """Extract text explanation from Cortex Analyst response"""
+    try:
+        if 'message' in cortex_response and 'content' in cortex_response['message']:
+            for content in cortex_response['message']['content']:
+                if content.get('type') == 'text' and 'text' in content:
+                    return content['text']
+        return None
+    except Exception as e:
+        st.error(f"Error extracting text from Cortex response: {e}")
+        return None
+
 def execute_semantic_query(dimensions: List[str], metrics: List[str], filters: Optional[str] = None, limit: int = 1000, semantic_view: str = "snowflake_monitoring_semantic") -> Optional[pd.DataFrame]:
     """Execute a semantic view query"""
     conn = get_snowflake_connection()
@@ -217,6 +425,37 @@ def execute_semantic_query(dimensions: List[str], metrics: List[str], filters: O
     except Exception as e:
         st.error(f"Error executing semantic query: {e}")
         return None
+
+def execute_raw_sql_query(sql_query: str) -> Optional[pd.DataFrame]:
+    """Execute raw SQL query from Cortex Analyst"""
+    conn = get_snowflake_connection()
+    if not conn:
+        return None
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql_query)
+        results = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        
+        df = pd.DataFrame(results, columns=columns)
+        cursor.close()
+        return df
+        
+    except Exception as e:
+        st.error(f"Error executing SQL query: {e}")
+        return None
+
+def get_available_semantic_views() -> List[str]:
+    """Get available semantic views"""
+    return [
+        "snowflake_monitoring_semantic",
+        "query_performance_semantic", 
+        "cost_analysis_semantic",
+        "user_activity_semantic",
+        "resource_utilization_semantic",
+        "security_monitoring_semantic"
+    ]
 
 def get_available_dimensions() -> List[str]:
     """Get available dimensions from semantic views"""
@@ -269,172 +508,49 @@ def format_duration(seconds: float) -> str:
         hours = seconds / 3600
         return f"{hours:.1f}h"
 
-def parse_natural_language_query(query: str) -> Dict[str, Any]:
-    """Parse natural language query and convert to semantic query parameters"""
-    query_lower = query.lower()
-    
-    # Initialize default parameters
-    params = {
-        'dimensions': [],
-        'metrics': [],
-        'filters': None,
-        'time_period': '7d',
-        'semantic_view': 'snowflake_monitoring_semantic'
-    }
-    
-    # Determine semantic view based on query type
-    # Check for specific phrases first
-    if 'performance analysis' in query_lower:
-        params['semantic_view'] = 'query_performance_semantic'
-    elif 'cost analysis' in query_lower:
-        params['semantic_view'] = 'cost_analysis_semantic'
-    elif 'query performance' in query_lower:
-        params['semantic_view'] = 'query_performance_semantic'
-    elif 'user activity' in query_lower:
-        params['semantic_view'] = 'user_activity_semantic'
-    elif 'avg timing' in query_lower or 'average timing' in query_lower:
-        params['semantic_view'] = 'query_performance_semantic'
-    elif 'query metrics' in query_lower:
-        params['semantic_view'] = 'query_performance_semantic'
-    # Then check for individual keywords
-    elif any(word in query_lower for word in ['performance', 'slow', 'execution', 'time', 'timing']):
-        params['semantic_view'] = 'query_performance_semantic'
-    elif any(word in query_lower for word in ['cost', 'spend', 'expense', 'money', 'billing']):
-        params['semantic_view'] = 'cost_analysis_semantic'
-    elif any(word in query_lower for word in ['user', 'activity', 'who', 'person']):
-        params['semantic_view'] = 'user_activity_semantic'
-    elif any(word in query_lower for word in ['resource', 'utilization', 'efficiency', 'usage']):
-        params['semantic_view'] = 'resource_utilization_semantic'
-    elif any(word in query_lower for word in ['security', 'access', 'suspicious', 'audit']):
-        params['semantic_view'] = 'security_monitoring_semantic'
-    
-    # Extract dimensions based on keywords and semantic view
-    if 'warehouse' in query_lower:
-        params['dimensions'].append('WAREHOUSE_NAME')
-    if 'user' in query_lower:
-        params['dimensions'].append('USER_NAME')
-    if 'type' in query_lower or 'query type' in query_lower:
-        params['dimensions'].append('QUERY_TYPE')
-    if 'date' in query_lower or 'time' in query_lower:
-        params['dimensions'].append('USAGE_DATE')
-    
-    # Extract metrics based on keywords
-    if 'cost' in query_lower or 'spend' in query_lower or 'expense' in query_lower or 'credits' in query_lower:
-        if params['semantic_view'] == 'cost_analysis_semantic':
-            params['metrics'].append('TOTAL_COST')
-        else:
-            params['metrics'].append('TOTAL_CREDITS')
-    if 'query' in query_lower and ('count' in query_lower or 'number' in query_lower):
-        params['metrics'].append('TOTAL_QUERIES')
-    if any(word in query_lower for word in ['avg', 'average', 'mean']) and any(word in query_lower for word in ['time', 'timing', 'execution']):
-        if params['semantic_view'] == 'query_performance_semantic':
-            params['metrics'].append('AVG_EXECUTION_TIME')
-        elif params['semantic_view'] == 'user_activity_semantic':
-            params['metrics'].append('AVG_USER_EXECUTION_TIME')
-        else:
-            params['metrics'].append('AVG_EXECUTION_TIME')
-    elif 'performance' in query_lower or 'execution' in query_lower or 'time' in query_lower:
-        params['metrics'].append('AVG_EXECUTION_TIME')
-    if 'slow' in query_lower:
-        params['metrics'].append('SLOW_QUERIES')
-    if 'data' in query_lower and 'scan' in query_lower:
-        params['metrics'].append('TOTAL_DATA_SCANNED')
-    if 'activity' in query_lower:
-        params['metrics'].append('TOTAL_USER_QUERIES')
-    if 'security' in query_lower or 'suspicious' in query_lower:
-        params['metrics'].append('SUSPICIOUS_ACTIVITY')
-    
-    # Set default dimensions and metrics if none specified
-    if not params['dimensions']:
-        if params['semantic_view'] == 'user_activity_semantic':
-            params['dimensions'] = ['USER_NAME']
-        elif params['semantic_view'] == 'query_performance_semantic':
-            params['dimensions'] = ['QUERY_TYPE']
-        elif params['semantic_view'] == 'cost_analysis_semantic':
-            params['dimensions'] = ['WAREHOUSE_NAME']
-        elif params['semantic_view'] == 'resource_utilization_semantic':
-            params['dimensions'] = ['WAREHOUSE_NAME']
-        elif params['semantic_view'] == 'security_monitoring_semantic':
-            params['dimensions'] = ['USER_NAME']
-        else:
-            params['dimensions'] = ['WAREHOUSE_NAME']
-    
-    if not params['metrics']:
-        if params['semantic_view'] == 'user_activity_semantic':
-            params['metrics'] = ['TOTAL_USER_QUERIES', 'AVG_USER_EXECUTION_TIME']
-        elif params['semantic_view'] == 'query_performance_semantic':
-            params['metrics'] = ['TOTAL_QUERIES', 'AVG_EXECUTION_TIME']
-        elif params['semantic_view'] == 'cost_analysis_semantic':
-            params['metrics'] = ['TOTAL_COST', 'AVG_DAILY_COST']
-        elif params['semantic_view'] == 'resource_utilization_semantic':
-            params['metrics'] = ['TOTAL_CREDITS_USED', 'AVG_CREDITS_PER_HOUR']
-        elif params['semantic_view'] == 'security_monitoring_semantic':
-            params['metrics'] = ['TOTAL_USER_ACTIVITY', 'SUSPICIOUS_ACTIVITY']
-        else:
-            params['metrics'] = ['TOTAL_CREDITS', 'TOTAL_QUERIES']
-    
-    # Ensure we have at least one metric that exists in the semantic view
-    if not params['metrics']:
-        params['metrics'] = ['TOTAL_QUERIES']  # Fallback metric
-    
-    return params
-
 def generate_insights(df: pd.DataFrame, query: str) -> List[str]:
-    """Generate AI-powered insights from the data"""
+    """Generate AI-powered insights using vectorized operations"""
     insights = []
     
     if df.empty:
         return ["No data available for the specified query."]
     
-    # Cost insights
+    # Vectorized analysis for better performance
     if 'TOTAL_CREDITS' in df.columns:
-        total_credits = df['TOTAL_CREDITS'].sum()
-        avg_credits = df['TOTAL_CREDITS'].mean()
-        
+        total_credits = float(df['TOTAL_CREDITS'].sum())
         if total_credits > 100:
-            insights.append(f"💰 **High Cost Alert**: Total credits consumed: {total_credits:.2f} (${total_credits * 0.0004:.2f})")
+            insights.append(f"💰 High credit consumption: {total_credits:.2f} credits")
         
         if 'WAREHOUSE_NAME' in df.columns:
             top_warehouse = df.groupby('WAREHOUSE_NAME')['TOTAL_CREDITS'].sum().idxmax()
-            insights.append(f"🏭 **Top Consumer**: {top_warehouse} is consuming the most credits")
+            insights.append(f"🏭 Top consumer: {top_warehouse}")
     
-    # Performance insights
     if 'AVG_EXECUTION_TIME' in df.columns:
-        avg_time = df['AVG_EXECUTION_TIME'].mean()
-        if avg_time > 30000:  # 30 seconds
-            insights.append(f"⚡ **Performance Issue**: Average execution time is {format_duration(avg_time)}")
-        elif avg_time > 10000:  # 10 seconds
-            insights.append(f"⚠️ **Moderate Performance**: Average execution time is {format_duration(avg_time)}")
+        avg_time = float(df['AVG_EXECUTION_TIME'].mean())
+        if avg_time > 30000:
+            insights.append(f"⚡ Performance issue: {format_duration(avg_time)}")
+        elif avg_time > 10000:
+            insights.append(f"⚠️ Moderate performance: {format_duration(avg_time)}")
         else:
-            insights.append(f"✅ **Good Performance**: Average execution time is {format_duration(avg_time)}")
-        
-        # Query type specific insights
-        if 'QUERY_TYPE' in df.columns:
-            query_performance = df.groupby('QUERY_TYPE')['AVG_EXECUTION_TIME'].mean().sort_values(ascending=False)
-            slowest_type = query_performance.index[0]
-            slowest_time = query_performance.iloc[0]
-            insights.append(f"🔍 **Slowest Query Type**: {slowest_type} queries take {format_duration(slowest_time)} on average")
+            insights.append(f"✅ Good performance: {format_duration(avg_time)}")
     
     if 'SLOW_QUERIES' in df.columns:
-        slow_count = df['SLOW_QUERIES'].sum()
+        slow_count = float(df['SLOW_QUERIES'].sum())
         if slow_count > 0:
-            insights.append(f"🐌 **Slow Queries**: {slow_count} slow queries detected")
+            insights.append(f"🐌 {slow_count:.0f} slow queries detected")
     
-    # Usage pattern insights
     if 'USAGE_HOUR' in df.columns and 'TOTAL_CREDITS' in df.columns:
-        hourly_usage = df.groupby('USAGE_HOUR')['TOTAL_CREDITS'].sum()
-        peak_hour = hourly_usage.idxmax()
-        insights.append(f"📊 **Peak Usage**: Hour {peak_hour} shows highest activity")
+        peak_hour = df.groupby('USAGE_HOUR')['TOTAL_CREDITS'].sum().idxmax()
+        insights.append(f"📊 Peak usage: Hour {peak_hour}")
     
-    # Trend insights
     if 'USAGE_DATE' in df.columns and 'TOTAL_CREDITS' in df.columns:
         daily_credits = df.groupby('USAGE_DATE')['TOTAL_CREDITS'].sum()
         if len(daily_credits) > 1:
             trend = daily_credits.iloc[-1] - daily_credits.iloc[0]
             if trend > 0:
-                insights.append("📈 **Trend**: Credit consumption is increasing")
+                insights.append("📈 Credit consumption increasing")
             elif trend < 0:
-                insights.append("📉 **Trend**: Credit consumption is decreasing")
+                insights.append("📉 Credit consumption decreasing")
     
     return insights
 
@@ -479,8 +595,8 @@ def create_visualization(df: pd.DataFrame, dimensions: List[str], metrics: List[
         return fig
 
 def chat_interface():
-    """Main chat interface for natural language queries"""
-    st.markdown('<h1 class="main-header">❄️ Snowflake Semantic Analytics Chat</h1>', unsafe_allow_html=True)
+    """Main chat interface with Cortex Analyst integration"""
+    st.markdown('<h1 class="main-header">❄️ Snowflake AI-Powered Semantic Analytics</h1>', unsafe_allow_html=True)
     
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -493,43 +609,50 @@ def chat_interface():
         # Connection status
         conn = get_snowflake_connection()
         if conn:
-            st.success("✅ Connected to Snowflake")
+            st.markdown('<div class="status-success">✅ Connected to Snowflake</div>', unsafe_allow_html=True)
         else:
-            st.error("❌ Connection failed")
+            st.markdown('<div class="status-error">❌ Connection failed</div>', unsafe_allow_html=True)
+            return
+        
+        st.markdown("")  # Add spacing
+        
+        # Cortex Analyst status
+        token = get_cortex_analyst_token()
+        if token:
+            st.markdown('<div class="status-success">✅ Cortex Analyst Ready</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="status-error">❌ Cortex Analyst not configured</div>', unsafe_allow_html=True)
             return
         
         st.markdown("---")
-        st.title("💡 Quick Actions")
+        st.title("🤖 AI-Powered Queries")
         
-        # Predefined queries
-        st.subheader("Common Questions")
-        quick_queries = [
-            "Show me warehouse costs for the last week",
-            "Which warehouses are consuming the most credits?",
-            "What's the average query execution time?",
-            "Show me user activity by hour",
-            "Which query types are most common?",
-            "What's the cost trend over the last month?",
-            "Show me user performance analysis",
-            "Which users have the most suspicious activity?",
-            "What's the resource utilization by warehouse?",
-            "Show me slow query performance"
-        ]
-        
-        for query in quick_queries:
-            if st.button(query, key=f"quick_{query[:20]}"):
-                st.session_state.user_input = query
-                st.rerun()
+        # Natural Language Queries
+        st.subheader("Ask Anything About Your Snowflake Data")
+        st.info("💡 Try asking questions like:")
+        st.markdown("""
+        - "What's our total Snowflake usage?"
+        - "Which warehouses cost the most?"
+        - "Show me slow queries"
+        - "Who are the most active users?"
+        - "Any suspicious activity?"
+        - "What's our peak usage time?"
+        """)
         
         st.markdown("---")
-        st.title("📊 Available Metrics")
-        st.write("**Dimensions:**")
-        for dim in get_available_dimensions():
-            st.write(f"• {dim}")
+        st.title("📊 Available Semantic Views")
+        semantic_views = get_available_semantic_views()
+        for view in semantic_views:
+            st.write(f"• {view}")
         
-        st.write("**Metrics:**")
-        for metric in get_available_metrics():
-            st.write(f"• {metric}")
+        st.markdown("---")
+        st.title("🔍 How It Works")
+        st.info("""
+        1. **AI Understanding**: Cortex Analyst interprets your natural language
+        2. **Smart Selection**: Automatically chooses the best semantic view
+        3. **SQL Generation**: Creates optimized SQL queries
+        4. **Enhanced Results**: Provides insights and visualizations
+        """)
     
     # Main chat area
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -554,90 +677,140 @@ def chat_interface():
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Process the query
+        # Process the query with Cortex Analyst
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing your query..."):
-                # Parse natural language query
-                params = parse_natural_language_query(prompt)
+            with st.spinner("🤖 AI is analyzing your query..."):
+                # Step 1: Call Cortex Analyst API
+                semantic_views = get_available_semantic_views()
+                cortex_response = call_cortex_analyst_api(prompt, semantic_views)
                 
-                # Execute semantic query
-                try:
-                    df = execute_semantic_query(
-                        dimensions=params['dimensions'],
-                        metrics=params['metrics'],
-                        filters=params['filters'],
-                        semantic_view=params['semantic_view']
-                    )
-                except Exception as e:
-                    st.error(f"Error executing query: {e}")
-                    # Try with fallback metrics
-                    st.info("Trying with fallback metrics...")
-                    fallback_metrics = ['TOTAL_QUERIES'] if 'TOTAL_QUERIES' in get_available_metrics() else ['TOTAL_CREDITS']
-                    df = execute_semantic_query(
-                        dimensions=params['dimensions'],
-                        metrics=fallback_metrics,
-                        filters=params['filters'],
-                        semantic_view=params['semantic_view']
-                    )
-                
-                if df is not None and not df.empty:
-                    # Generate insights
-                    insights = generate_insights(df, prompt)
+                if cortex_response:
+                    # Extract AI interpretation and SQL
+                    ai_interpretation = extract_text_from_cortex_response(cortex_response)
+                    generated_sql = extract_sql_from_cortex_response(cortex_response)
                     
-                    # Create comprehensive response
-                    response = f"✅ **Query Results:**\n\n"
-                    response += f"**Semantic View:** {params['semantic_view'].replace('_', ' ').title()}\n"
-                    response += f"**Dimensions:** {', '.join(params['dimensions'])}\n"
-                    response += f"**Metrics:** {', '.join(params['metrics'])}\n"
-                    response += f"**Records:** {len(df)}\n\n"
+                    # Display AI interpretation
+                    if ai_interpretation:
+                        st.markdown(f"""
+                        <div class="ai-insights">
+                            <strong>🤖 AI Interpretation:</strong><br>
+                            {ai_interpretation}
+                        </div>
+                        """, unsafe_allow_html=True)
                     
-                    # Add concise answer based on the query type
-                    if 'avg' in prompt.lower() or 'average' in prompt.lower() or 'timing' in prompt.lower():
-                        if 'AVG_EXECUTION_TIME' in params['metrics']:
-                            avg_time = df['AVG_EXECUTION_TIME'].mean()
-                            response += f"**📊 Answer:** The average execution time across all query types is **{format_duration(avg_time)}**.\n\n"
-                        elif 'AVG_USER_EXECUTION_TIME' in params['metrics']:
-                            avg_time = df['AVG_USER_EXECUTION_TIME'].mean()
-                            response += f"**📊 Answer:** The average user execution time is **{format_duration(avg_time)}**.\n\n"
-                    elif 'cost' in prompt.lower() or 'spend' in prompt.lower():
-                        if 'TOTAL_COST' in params['metrics']:
-                            total_cost = df['TOTAL_COST'].sum()
-                            response += f"**📊 Answer:** Total cost is **${total_cost:,.2f}**.\n\n"
-                        elif 'TOTAL_CREDITS' in params['metrics']:
-                            total_credits = df['TOTAL_CREDITS'].sum()
-                            response += f"**📊 Answer:** Total credits consumed is **{total_credits:,.2f}** (${total_credits * 0.0004:.2f}).\n\n"
-                    elif 'query' in prompt.lower() and ('count' in prompt.lower() or 'number' in prompt.lower()):
-                        if 'TOTAL_QUERIES' in params['metrics']:
-                            total_queries = df['TOTAL_QUERIES'].sum()
-                            response += f"**📊 Answer:** Total number of queries is **{total_queries:,.0f}**.\n\n"
+                    # Display generated SQL in dropdown
+                    if generated_sql:
+                        with st.expander("🔍 View Generated SQL", expanded=False):
+                            st.markdown(f"""
+                            <div class="sql-content">
+                                {generated_sql}
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Step 2: Execute the generated SQL
+                        with st.spinner("📊 Executing query..."):
+                            df = execute_raw_sql_query(generated_sql)
+                            
+                            if df is not None and not df.empty:
+                                # Generate insights
+                                insights = generate_insights(df, prompt)
+                                
+                                # Create comprehensive response
+                                response = f"✅ **Query Results:**\n\n"
+                                response += f"**Records Found:** {len(df)}\n\n"
+                                
+                                # Create concise answer first
+                                concise_answer = ""
+                                
+                                # Extract the most relevant metric for concise answer
+                                if 'TOTAL_COST' in df.columns:
+                                    total_cost = float(df['TOTAL_COST'].sum())
+                                    concise_answer = f"💰 **Total Cost:** {format_currency(total_cost)}"
+                                elif 'TOTAL_CREDITS' in df.columns:
+                                    total_credits = float(df['TOTAL_CREDITS'].sum())
+                                    concise_answer = f"💳 **Total Credits:** {total_credits:,.2f}"
+                                elif 'AVG_EXECUTION_TIME' in df.columns:
+                                    avg_time = float(df['AVG_EXECUTION_TIME'].mean())
+                                    concise_answer = f"⏱️ **Average Execution Time:** {format_duration(avg_time)}"
+                                elif 'TOTAL_QUERIES' in df.columns:
+                                    total_queries = float(df['TOTAL_QUERIES'].sum())
+                                    concise_answer = f"📊 **Total Queries:** {total_queries:,.0f}"
+                                else:
+                                    concise_answer = f"📊 **Records Found:** {len(df)}"
+                                
+                                # Display concise answer prominently
+                                st.markdown(f"""
+                                <div class="concise-answer">
+                                    {concise_answer}
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # Create detailed response
+                                response = f"**📋 Detailed Analysis:**\n\n"
+                                
+                                # Provide comprehensive summary
+                                if 'TOTAL_COST' in df.columns:
+                                    total_cost = float(df['TOTAL_COST'].sum())
+                                    response += f"• **Total Cost:** {format_currency(total_cost)}\n"
+                                elif 'TOTAL_CREDITS' in df.columns:
+                                    total_credits = float(df['TOTAL_CREDITS'].sum())
+                                    response += f"• **Total Credits:** {total_credits:,.2f}\n"
+                                
+                                if 'AVG_EXECUTION_TIME' in df.columns:
+                                    avg_time = float(df['AVG_EXECUTION_TIME'].mean())
+                                    response += f"• **Average Execution Time:** {format_duration(avg_time)}\n"
+                                
+                                if 'TOTAL_QUERIES' in df.columns:
+                                    total_queries = float(df['TOTAL_QUERIES'].sum())
+                                    response += f"• **Total Queries:** {total_queries:,.0f}\n"
+                                
+                                if 'WAREHOUSE_NAME' in df.columns:
+                                    unique_warehouses = df['WAREHOUSE_NAME'].nunique()
+                                    response += f"• **Active Warehouses:** {unique_warehouses}\n"
+                                
+                                response += f"\n**📊 Data Summary:** Found **{len(df)}** records with the requested data.\n\n"
+                                
+                                # Show insights
+                                if insights:
+                                    response += "**🔍 AI Insights:**\n"
+                                    for insight in insights:
+                                        response += f"• {insight}\n"
+                                    response += "\n"
+                                
+                                # Display the detailed response
+                                st.markdown(response)
+                                
+                                # Show insights
+                                if insights:
+                                    st.markdown("**🔍 AI Insights:**")
+                                    for insight in insights:
+                                        st.markdown(f"• {insight}")
+                                    st.markdown("")
+                                
+                                # Create visualization if data supports it
+                                if len(df) > 1 and any(col in df.columns for col in ['TOTAL_COST', 'TOTAL_CREDITS', 'AVG_EXECUTION_TIME', 'TOTAL_QUERIES']):
+                                    st.markdown("**📈 Data Visualization:**")
+                                    fig = create_visualization(df, [], [])
+                                    st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Show expanded data preview
+                                st.markdown("**📊 Data Preview:**")
+                                st.dataframe(df, use_container_width=True)
+                                
+                                # Add assistant response to chat history
+                                st.session_state.messages.append({"role": "assistant", "content": response})
+                                
+                            else:
+                                error_msg = "❌ No data found for your query. The AI-generated SQL didn't return any results."
+                                st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
+                                st.session_state.messages.append({"role": "assistant", "content": error_msg})
                     else:
-                        # Generic answer
-                        response += f"**📊 Answer:** Found **{len(df)}** records with the requested data.\n\n"
-                    
-                    # Show insights
-                    if insights:
-                        response += "**🔍 AI Insights:**\n"
-                        for insight in insights:
-                            response += f"• {insight}\n"
-                        response += "\n"
-                    
-                    # Display the response
-                    st.markdown(response)
-                    
-                    # Create visualization
-                    fig = create_visualization(df, params['dimensions'], params['metrics'])
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Show data preview
-                    with st.expander("📋 Data Preview"):
-                        st.dataframe(df.head(10), use_container_width=True)
-                    
-                    # Add assistant response to chat history
-                    st.session_state.messages.append({"role": "assistant", "content": response})
-                    
+                        error_msg = "❌ Cortex Analyst couldn't generate SQL for your query. Try rephrasing your question."
+                        st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
                 else:
-                    error_msg = "❌ No data found for your query. Try rephrasing or check the available metrics in the sidebar."
-                    st.error(error_msg)
+                    error_msg = "❌ Failed to connect to Cortex Analyst. Please check your configuration."
+                    st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
     
     # Always show chat input at the end
@@ -665,8 +838,6 @@ def dashboard_view():
         total_credits = float(overview_data['TOTAL_CREDITS'].sum())
         total_queries = float(overview_data['TOTAL_QUERIES'].sum()) if 'TOTAL_QUERIES' in overview_data.columns else 0
         active_warehouses = overview_data['WAREHOUSE_NAME'].nunique()
-        estimated_cost = total_credits * 0.0004
-        
         with col1:
             st.markdown(f"""
             <div class="metric-card">
@@ -694,8 +865,8 @@ def dashboard_view():
         with col4:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">{format_currency(estimated_cost)}</div>
-                <div class="metric-label">Estimated Cost</div>
+                <div class="metric-value">{total_credits:,.0f}</div>
+                <div class="metric-label">Total Credits</div>
             </div>
             """, unsafe_allow_html=True)
     
@@ -735,11 +906,11 @@ def main():
     st.sidebar.title("🎯 Navigation")
     page = st.sidebar.selectbox(
         "Choose Interface",
-        ["💬 Chat Interface", "📊 Dashboard View"]
+        ["🤖 AI Chat Interface", "📊 Dashboard View"]
     )
     
     # Page routing
-    if page == "💬 Chat Interface":
+    if page == "🤖 AI Chat Interface":
         chat_interface()
     elif page == "📊 Dashboard View":
         dashboard_view()
@@ -748,7 +919,7 @@ def main():
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666;'>"
-        "Powered by Snowflake Semantic Views & Streamlit | "
+        "Powered by Snowflake Cortex Analyst & Semantic Views | "
         f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         "</div>",
         unsafe_allow_html=True
