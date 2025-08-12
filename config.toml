@@ -1,0 +1,11 @@
+# cmd - snow --config-file=config.toml connection test -c semantics
+
+[connections.semantics]
+account = "YECALEZ-TCB02565"
+user = "SVC_AKHIL"
+authenticator = "PROGRAMMATIC_ACCESS_TOKEN"
+token_file_path = "snowflake-pat.token"
+role = "ACCOUNTADMIN"
+warehouse = "COMPUTE_WH"
+database = "SNOWFLAKE_MONITORING"
+schema = "MONITORING_SEMANTIC"
