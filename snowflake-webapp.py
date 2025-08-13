@@ -2,22 +2,26 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import numpy as np
-from datetime import datetime, timedelta
-# json not needed with _snowflake module approach
-import time
-import requests
+from datetime import datetime
 from typing import List, Dict, Any, Optional
-import re
-import base64
 from snowflake.snowpark.context import get_active_session
-# Remove unused import
+import requests  # For token-based authentication fallback
+
+# Configuration constants
+CONFIG = {
+    'app_title': 'Snowflake Semantic Analytics - AI-Powered Business Intelligence',
+    'app_icon': '❄️', 
+    'credit_to_dollar_rate': 3,  # 1 credit = $3
+    'api_timeout': 30,
+    'cortex_model': 'llama3.1-8b',
+    'semantic_schema': 'SNOWFLAKE_MONITORING.MONITORING_SEMANTIC'
+}
 
 # Page configuration
 st.set_page_config(
-    page_title="Snowflake Semantic Analytics - AI-Powered Business Intelligence",
-    page_icon="❄️",
+    page_title=CONFIG['app_title'],
+    page_icon=CONFIG['app_icon'],
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -257,299 +261,195 @@ st.markdown("""
 
 @st.cache_resource
 def get_snowflake_session():
-    """Get active Snowflake session"""
+    """Get active Snowflake session with error handling"""
     try:
-        session = get_active_session()
-        return session
+        return get_active_session()
     except Exception as e:
-        st.error(f"Error connecting to Snowflake: {e}")
+        st.error(f"Failed to connect to Snowflake: {e}")
         return None
 
-def get_cortex_analyst_token():
-    """Get authentication token for Cortex Analyst API in SiS environment"""
+def get_account_info(session) -> Dict[str, str]:
+    """Get account and region information from session"""
     try:
-        # In SiS environment, we can extract the token from the session
-        session = get_snowflake_session()
-        if session:
-            # Use Snowpark's session to get connection info
-            # Extract token from connection parameters if available
-            conn = session._conn
-            if hasattr(conn, 'token') and conn.token:
-                return conn.token
-            
-            # Alternative: try to get from environment variables that SiS sets
-            import os
-            snowflake_token = os.environ.get('SNOWFLAKE_TOKEN')
-            if snowflake_token:
-                return snowflake_token
-                
-            # For SiS, the session already has authentication context
-            # We'll handle this in the API call
-            return "sis_session_auth"
-        return None
+        result = session.sql("SELECT CURRENT_ACCOUNT() as account, CURRENT_REGION() as region").collect()
+        if result:
+            return {
+                'account': result[0]['ACCOUNT'],
+                'region': result[0]['REGION'],
+                'url': f"{result[0]['ACCOUNT']}.{result[0]['REGION']}.snowflakecomputing.com"
+            }
     except Exception as e:
-        st.warning(f"Token extraction failed, will use session context: {e}")
-        return "sis_session_auth"
+        st.error(f"Failed to get account info: {e}")
+    return {}
+
+def get_auth_method(session) -> str:
+    """Determine the best authentication method for Cortex Analyst"""
+    try:
+        # Try to get token from session connection
+        conn = session._conn
+        if hasattr(conn, 'token') and conn.token:
+            return conn.token
+        
+        # Check for SiS environment
+        import importlib.util
+        if importlib.util.find_spec("_snowflake") is not None:
+            return "sis_native"
+            
+        return None
+    except Exception:
+        return "sis_native"  # Default to SiS native
 
 def call_cortex_analyst_api(user_query: str, semantic_views: List[str]) -> Dict[str, Any]:
-    """
-    Call Cortex Analyst REST API using proper authentication for SiS environment
-    """
+    """Call Cortex Analyst REST API with dynamic authentication"""
     session = get_snowflake_session()
     if not session:
         return None
     
-    # Get account information and construct proper account URL
-    try:
-        account_info = session.sql("SELECT CURRENT_ACCOUNT() as account, CURRENT_REGION() as region").collect()
-        if not account_info:
-            return None
-        
-        account = account_info[0]['ACCOUNT']
-        region = account_info[0]['REGION']
-        
-        # Construct the correct account URL for API calls
-        account_url = f"{account}.{region}.snowflakecomputing.com"
-        
-    except Exception as e:
-        st.error(f"Error getting account info: {e}")
+    account_info = get_account_info(session)
+    if not account_info:
         return None
+        
+    auth_method = get_auth_method(session)
     
-    # Get authentication token
-    token = get_cortex_analyst_token()
-    
-    # For SiS environment, use session-based authentication with requests
-    if token == "sis_session_auth":
-        # Use session credentials for API call
-        return call_cortex_analyst_with_session_auth(user_query, semantic_views, account_url, session)
-    elif token:
-        # Use token-based authentication
-        return call_cortex_analyst_with_token(user_query, semantic_views, account_url, token)
+    if auth_method == "sis_native":
+        return call_cortex_analyst_native(user_query, semantic_views, session)
+    elif auth_method:
+        return call_cortex_analyst_token(user_query, semantic_views, account_info['url'], auth_method)
     else:
-        st.error("No valid authentication method available")
+        st.error("No valid authentication available")
         return None
 
-def call_cortex_analyst_with_token(user_query: str, semantic_views: List[str], account_url: str, token: str) -> Dict[str, Any]:
-    """Call Cortex Analyst REST API with token authentication"""
-    # Prepare the request payload - Note: Using semantic_models not semantic_views
-    payload = {
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": user_query
-                    }
-                ]
-            }
-        ],
+def create_cortex_payload(user_query: str, semantic_views: List[str]) -> Dict[str, Any]:
+    """Create standardized payload for Cortex Analyst API"""
+    return {
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": user_query}]
+        }],
         "semantic_models": [
-            {"semantic_view": f"SNOWFLAKE_MONITORING.MONITORING_SEMANTIC.{view}"} 
+            {"semantic_view": f"{CONFIG['semantic_schema']}.{view}"} 
             for view in semantic_views
         ],
         "stream": False
     }
-    
+
+def call_cortex_analyst_token(user_query: str, semantic_views: List[str], account_url: str, token: str) -> Dict[str, Any]:
+    """Call Cortex Analyst with token authentication"""
+    payload = create_cortex_payload(user_query, semantic_views)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
     
     try:
-        url = f"https://{account_url}/api/v2/cortex/analyst/message"
-        
         response = requests.post(
-            url,
+            f"https://{account_url}/api/v2/cortex/analyst/message",
             headers=headers,
             json=payload,
-            timeout=30
+            timeout=CONFIG['api_timeout']
         )
         
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"Cortex Analyst API error: {response.status_code} - {response.text}")
-            return None
-            
+        return response.json() if response.status_code == 200 else None
     except Exception as e:
-        st.error(f"Error calling Cortex Analyst API: {e}")
+        st.error(f"API call failed: {e}")
         return None
 
-def call_cortex_analyst_with_session_auth(user_query: str, semantic_views: List[str], account_url: str, session) -> Dict[str, Any]:
-    """Call Cortex Analyst using session-based approach for SiS without side effects"""
+def call_cortex_analyst_native(user_query: str, semantic_views: List[str], session) -> Dict[str, Any]:
+    """Call Cortex Analyst using native SiS capabilities"""
     try:
-        # In SiS, we can't use SYSTEM$ functions with side effects
-        # Instead, we'll use the Snowpark session's built-in request capabilities
-        # This is the approach recommended by the Snowflake quickstart
+        import _snowflake
+        import json
         
-        # Import the necessary modules for SiS
-        try:
-            import _snowflake
-        except ImportError:
-            st.error("This functionality requires Streamlit in Snowflake environment")
-            return None
-        
-        # Create the request body as per Snowflake documentation
-        request_body = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": user_query
-                        }
-                    ]
-                }
-            ],
-            "semantic_models": [
-                {"semantic_view": f"SNOWFLAKE_MONITORING.MONITORING_SEMANTIC.{view}"} 
-                for view in semantic_views
-            ],
-        }
-        
-        # Use _snowflake.send_snow_api_request which is available in SiS
-        API_ENDPOINT = "/api/v2/cortex/analyst/message"
-        API_TIMEOUT = 30
+        request_body = create_cortex_payload(user_query, semantic_views)
         
         resp = _snowflake.send_snow_api_request(
             "POST",
-            API_ENDPOINT,
-            {},  # headers
-            {},  # params
-            request_body,  # request body
-            None,  # request_guid
-            API_TIMEOUT,
+            "/api/v2/cortex/analyst/message",
+            {}, {}, request_body, None,
+            CONFIG['api_timeout']
         )
         
         if resp and resp.get('status') == 200:
-            # Parse the JSON content from the response
-            import json
             content = resp.get('content', '{}')
-            if isinstance(content, str):
-                return json.loads(content)
-            else:
-                return content
-        else:
-            st.error(f"Cortex Analyst API error: {resp}")
-            return None
-            
+            return json.loads(content) if isinstance(content, str) else content
+        
+        st.error(f"Native API error: {resp}")
+        return None
+        
+    except ImportError:
+        st.error("SiS environment required for native calls")
+        return None
     except Exception as e:
-        st.error(f"Session-based API call failed: {e}")
+        st.error(f"Native API call failed: {e}")
         return None
 
-# Removed old function - using proper REST API approach above
+# Response parsing utilities
 
-def generate_sql_for_query(user_query: str, semantic_views: List[str]) -> str:
-    """Generate SQL based on user query and available semantic views using SEMANTIC_VIEW function"""
-    query_lower = user_query.lower()
-    
-    # Enhanced query mapping that uses SEMANTIC_VIEW function for SiS compatibility
-    if 'total' in query_lower and ('cost' in query_lower or 'usage' in query_lower):
-        return """
-        SELECT * FROM SEMANTIC_VIEW(
-            snowflake_monitoring_semantic
-            DIMENSIONS
-            METRICS TOTAL_CREDITS, TOTAL_QUERIES, AVG_EXECUTION_TIME
-        )
-        """
-    elif 'warehouse' in query_lower and ('cost' in query_lower or 'credits' in query_lower):
-        return """
-        SELECT * FROM SEMANTIC_VIEW(
-            snowflake_monitoring_semantic
-            DIMENSIONS WAREHOUSE_NAME
-            METRICS TOTAL_CREDITS, TOTAL_QUERIES
-        )
-        ORDER BY TOTAL_CREDITS DESC
-        """
-    elif 'slow' in query_lower or 'execution' in query_lower:
-        return """
-        SELECT * FROM SEMANTIC_VIEW(
-            query_performance_semantic
-            DIMENSIONS WAREHOUSE_NAME
-            METRICS AVG_EXECUTION_TIME
-        )
-        ORDER BY AVG_EXECUTION_TIME DESC
-        """
-    elif 'user' in query_lower and ('active' in query_lower or 'count' in query_lower):
-        return """
-        SELECT * FROM SEMANTIC_VIEW(
-            user_activity_semantic
-            DIMENSIONS USER_NAME
-            METRICS TOTAL_USER_QUERIES, AVG_USER_EXECUTION_TIME
-        )
-        ORDER BY TOTAL_USER_QUERIES DESC
-        LIMIT 10
-        """
-    elif 'suspicious' in query_lower or 'security' in query_lower:
-        return """
-        SELECT * FROM SEMANTIC_VIEW(
-            security_monitoring_semantic
-            DIMENSIONS USER_NAME
-            METRICS SUSPICIOUS_ACTIVITY, LONG_RUNNING_QUERIES
-        )
-        WHERE SUSPICIOUS_ACTIVITY > 0 OR LONG_RUNNING_QUERIES > 0
-        ORDER BY SUSPICIOUS_ACTIVITY DESC
-        """
-    else:
-        # Default query using semantic view
-        return """
-        SELECT * FROM SEMANTIC_VIEW(
-            snowflake_monitoring_semantic
-            DIMENSIONS WAREHOUSE_NAME, USER_NAME
-            METRICS TOTAL_CREDITS, TOTAL_QUERIES
-        )
-        LIMIT 100
-        """
-
-def extract_sql_from_cortex_response(cortex_response: Dict[str, Any]) -> Optional[str]:
-    """Extract SQL statement from Cortex Analyst response - Same as local app.py"""
+def extract_from_cortex_response(response: Dict[str, Any], content_type: str) -> Optional[str]:
+    """Extract content from Cortex Analyst response by type"""
     try:
-        if 'message' in cortex_response and 'content' in cortex_response['message']:
-            for content in cortex_response['message']['content']:
-                if content.get('type') == 'sql' and 'statement' in content:
-                    return content['statement']
+        if 'message' in response and 'content' in response['message']:
+            for content in response['message']['content']:
+                if content.get('type') == content_type:
+                    return content.get('statement' if content_type == 'sql' else 'text')
         return None
     except Exception as e:
-        st.error(f"Error extracting SQL from Cortex response: {e}")
+        st.error(f"Error extracting {content_type}: {e}")
         return None
 
-def extract_text_from_cortex_response(cortex_response: Dict[str, Any]) -> Optional[str]:
-    """Extract text explanation from Cortex Analyst response - Same as local app.py"""
-    try:
-        if 'message' in cortex_response and 'content' in cortex_response['message']:
-            for content in cortex_response['message']['content']:
-                if content.get('type') == 'text' and 'text' in content:
-                    return content['text']
-        return None
-    except Exception as e:
-        st.error(f"Error extracting text from Cortex response: {e}")
-        return None
+def extract_sql_from_cortex_response(response: Dict[str, Any]) -> Optional[str]:
+    """Extract SQL statement from Cortex Analyst response"""
+    return extract_from_cortex_response(response, 'sql')
 
-def execute_raw_sql_query(sql_query: str) -> Optional[pd.DataFrame]:
-    """Execute raw SQL query from Cortex Analyst"""
+def extract_text_from_cortex_response(response: Dict[str, Any]) -> Optional[str]:
+    """Extract text explanation from Cortex Analyst response"""
+    return extract_from_cortex_response(response, 'text')
+
+def execute_sql_query(sql_query: str) -> Optional[pd.DataFrame]:
+    """Execute SQL query using Snowpark session"""
     session = get_snowflake_session()
     if not session:
         return None
     
     try:
-        # Execute the query using Snowpark
         result = session.sql(sql_query).collect()
-        
-        if result:
-            # Convert to DataFrame
-            df = pd.DataFrame([row.as_dict() for row in result])
-            return df
-        else:
-            return pd.DataFrame()
-            
+        return pd.DataFrame([row.as_dict() for row in result]) if result else pd.DataFrame()
     except Exception as e:
-        st.error(f"Error executing SQL query: {e}")
+        st.error(f"Query execution failed: {e}")
         return None
 
+@st.cache_data
 def get_available_semantic_views() -> List[str]:
-    """Get available semantic views"""
+    """Get available semantic views dynamically"""
+    session = get_snowflake_session()
+    if not session:
+        # Fallback to known views
+        return [
+            "snowflake_monitoring_semantic",
+            "query_performance_semantic", 
+            "cost_analysis_semantic",
+            "user_activity_semantic",
+            "resource_utilization_semantic",
+            "security_monitoring_semantic"
+        ]
+    
+    try:
+        # Try to get views dynamically from the schema
+        schema_parts = CONFIG['semantic_schema'].split('.')
+        query = f"""
+        SELECT table_name 
+        FROM {schema_parts[0]}.information_schema.tables 
+        WHERE table_schema = '{schema_parts[1]}' 
+        AND table_type = 'VIEW'
+        AND table_name LIKE '%semantic%'
+        """
+        result = session.sql(query).collect()
+        if result:
+            return [row['TABLE_NAME'].lower() for row in result]
+    except Exception:
+        pass
+    
+    # Fallback to known views
     return [
         "snowflake_monitoring_semantic",
         "query_performance_semantic", 
@@ -559,25 +459,117 @@ def get_available_semantic_views() -> List[str]:
         "security_monitoring_semantic"
     ]
 
-def format_currency(value: float) -> str:
-    """Format value as currency"""
-    if pd.isna(value) or value == 0:
-        return "$0.00"
-    return f"${value:,.2f}"
+# Formatting utilities
+def format_currency(credits: float) -> str:
+    """Convert credits to currency display"""
+    if pd.isna(credits) or credits == 0:
+        return "$0.00 (0 credits)"
+    
+    dollars = credits * CONFIG['credit_to_dollar_rate']
+    return f"${dollars:,.2f} ({credits:,.1f} credits)"
+
+def format_credits(credits: float) -> str:
+    """Format credits without currency conversion"""
+    if pd.isna(credits) or credits == 0:
+        return "0 credits"
+    return f"{credits:,.1f} credits"
 
 def format_duration(seconds: float) -> str:
-    """Format duration in seconds to human readable format"""
+    """Format duration in human readable format"""
     if pd.isna(seconds) or seconds == 0:
         return "0s"
     
     if seconds < 60:
         return f"{seconds:.1f}s"
     elif seconds < 3600:
-        minutes = seconds / 60
-        return f"{minutes:.1f}m"
+        return f"{seconds/60:.1f}m"
     else:
-        hours = seconds / 3600
-        return f"{hours:.1f}h"
+        return f"{seconds/3600:.1f}h"
+
+def generate_intelligent_answer(df: pd.DataFrame, user_query: str, session) -> str:
+    """Generate intelligent answer using Cortex LLM or fallback"""
+    if df.empty:
+        return "No data found for your query."
+    
+    try:
+        data_summary = create_data_summary(df)
+        
+        prompt = f"""
+        Question: {user_query}
+        Data: {data_summary}
+        
+        Provide a concise answer with specific numbers. 
+        For costs: multiply credits by {CONFIG['credit_to_dollar_rate']} for dollars.
+        Format: "X credits ($Y)" where Y = X × {CONFIG['credit_to_dollar_rate']}.
+        Keep under 25 words.
+        """
+        
+        result = session.sql(f"""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                '{CONFIG['cortex_model']}',
+                '{prompt.replace("'", "''")}'
+            ) as answer
+        """).collect()
+        
+        if result:
+            answer = result[0]['ANSWER'].strip().strip('"')
+            return answer if answer else generate_fallback_answer(df)
+            
+    except Exception:
+        pass
+    
+    return generate_fallback_answer(df)
+
+def create_data_summary(df: pd.DataFrame) -> str:
+    """Create concise data summary for LLM analysis"""
+    if df.empty:
+        return "No data"
+    
+    summary = [f"Columns: {', '.join(df.columns[:4])}"]
+    
+    # Add top 3 rows with key info
+    for idx, row in df.head(3).iterrows():
+        row_data = []
+        for col in df.columns[:4]:
+            if col in row and pd.notna(row[col]):
+                row_data.append(f"{col}: {row[col]}")
+        if row_data:
+            summary.append(f"Row {idx + 1}: {', '.join(row_data)}")
+    
+    summary.append(f"Total: {len(df)} rows")
+    return " | ".join(summary)
+
+def generate_fallback_answer(df: pd.DataFrame) -> str:
+    """Generate rule-based fallback answer"""
+    if df.empty:
+        return "No data found"
+    
+    # Identify column types
+    cost_cols = [col for col in df.columns if any(term in col.lower() for term in ['cost', 'credit', 'price'])]
+    warehouse_cols = [col for col in df.columns if 'warehouse' in col.lower()]
+    user_cols = [col for col in df.columns if 'user' in col.lower()]
+    time_cols = [col for col in df.columns if any(term in col.lower() for term in ['time', 'duration', 'execution'])]
+    
+    first_row = df.iloc[0]
+    
+    if cost_cols and warehouse_cols:
+        cost_val = first_row[cost_cols[0]]
+        warehouse = first_row[warehouse_cols[0]]
+        if 'credit' in cost_cols[0].lower():
+            dollars = cost_val * CONFIG['credit_to_dollar_rate']
+            return f"{warehouse} leads with {cost_val:,.1f} credits (${dollars:,.2f})"
+        return f"{warehouse} has highest cost: {format_currency(cost_val)}"
+    
+    elif time_cols and warehouse_cols:
+        time_val = first_row[time_cols[0]]
+        warehouse = first_row[warehouse_cols[0]]
+        return f"{warehouse} has longest time: {format_duration(time_val)}"
+    
+    elif user_cols:
+        return f"Top user: {first_row[user_cols[0]]}"
+    
+    # Default response
+    return f"Found {len(df)} results - top: {df.columns[0]} = {first_row[df.columns[0]]}"
 
 def create_simple_visualization(df: pd.DataFrame) -> go.Figure:
     """Create appropriate visualization based on data"""
@@ -644,15 +636,9 @@ def chat_interface():
         4. **SiS Environment**: Runs entirely within Snowflake infrastructure
         """)
         
-        # Suggested Queries with Click Functionality
+        # Dynamic suggested queries
         st.subheader("💡 Try These Questions")
-        suggested_queries = [
-            "What's our total Snowflake usage?",
-            "Which warehouses cost the most?",
-            "Show me slow queries",
-            "Who are the most active users?",
-            "Any suspicious activity?"
-        ]
+        suggested_queries = get_suggested_queries()
         
         for i, query in enumerate(suggested_queries):
             if st.button(query, key=f"suggested_{i}"):
@@ -678,19 +664,14 @@ def chat_interface():
         
         st.markdown("")  # Add spacing
         
-        # Cortex Analyst status - Check availability
-        token = get_cortex_analyst_token()
-        if token and token != "sis_session_auth":
-            st.markdown('<div class="status-success">✅ Cortex Analyst Ready (Token Auth)</div>', unsafe_allow_html=True)
-        elif token == "sis_session_auth":
-            try:
-                # Test if we can import _snowflake module (available in SiS)
-                import _snowflake
-                st.markdown('<div class="status-success">✅ Cortex Analyst Ready (SiS Native)</div>', unsafe_allow_html=True)
-            except ImportError:
-                st.markdown('<div class="status-warning">⚠️ Running outside SiS environment</div>', unsafe_allow_html=True)
+        # Cortex Analyst status
+        auth_method = get_auth_method(session) if session else None
+        if auth_method == "sis_native":
+            st.markdown('<div class="status-success">✅ Cortex Analyst Ready (SiS Native)</div>', unsafe_allow_html=True)
+        elif auth_method:
+            st.markdown('<div class="status-success">✅ Cortex Analyst Ready (Token)</div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="status-warning">⚠️ Using basic query functionality</div>', unsafe_allow_html=True)
+            st.markdown('<div class="status-warning">⚠️ Limited functionality</div>', unsafe_allow_html=True)
     
     # Main chat area
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -745,11 +726,20 @@ def chat_interface():
                             </div>
                             """, unsafe_allow_html=True)
                         
-                        # Step 2: Execute the generated SQL - exactly like local app.py
+                        # Execute the generated SQL
                         with st.spinner("📊 Executing query..."):
-                            df = execute_raw_sql_query(generated_sql)
+                            df = execute_sql_query(generated_sql)
                             
                             if df is not None and not df.empty:
+                                # Generate intelligent answer
+                                session = get_snowflake_session()
+                                concise_answer = generate_intelligent_answer(df, prompt, session)
+                                st.markdown(f"""
+                                <div class="concise-answer">
+                                    🎯 <strong>Answer:</strong> {concise_answer}
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
                                 # Show data results
                                 st.markdown("**📊 Query Results:**")
                                 st.dataframe(df, use_container_width=True)
@@ -761,7 +751,7 @@ def chat_interface():
                                     st.plotly_chart(fig, use_container_width=True)
                                 
                                 # Add assistant response to chat history
-                                response_content = f"AI Analysis: {ai_interpretation}\n\nData: {len(df)} records found"
+                                response_content = f"Answer: {concise_answer}\n\nAI Analysis: {ai_interpretation}\n\nData: {len(df)} records found"
                                 st.session_state.messages.append({"role": "assistant", "content": response_content})
                                 
                             else:
@@ -798,13 +788,14 @@ def dashboard_view():
     # Overview metrics
     col1, col2, col3, col4 = st.columns(4)
     
-    # Execute overview query
-    overview_data = execute_raw_sql_query("""
+    # Get overview data
+    base_view = get_available_semantic_views()[0]  # Use first available view
+    overview_data = execute_sql_query(f"""
         SELECT 
             WAREHOUSE_NAME,
             SUM(TOTAL_CREDITS) as TOTAL_CREDITS,
             SUM(TOTAL_QUERIES) as TOTAL_QUERIES
-        FROM snowflake_monitoring_semantic
+        FROM {CONFIG['semantic_schema']}.{base_view}
         GROUP BY WAREHOUSE_NAME
     """)
     
@@ -816,7 +807,7 @@ def dashboard_view():
         with col1:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">{total_credits:,.2f}</div>
+                <div class="metric-value">{format_credits(total_credits)}</div>
                 <div class="metric-label">Total Credits</div>
             </div>
             """, unsafe_allow_html=True)
@@ -838,10 +829,11 @@ def dashboard_view():
             """, unsafe_allow_html=True)
         
         with col4:
+            dollar_amount = total_credits * CONFIG['credit_to_dollar_rate']
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">{total_credits:,.0f}</div>
-                <div class="metric-label">Total Credits</div>
+                <div class="metric-value">${dollar_amount:,.2f}</div>
+                <div class="metric-label">Estimated Cost ({total_credits:,.1f} credits)</div>
             </div>
             """, unsafe_allow_html=True)
     
@@ -875,40 +867,57 @@ def dashboard_view():
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-def main():
-    """Main application function for Streamlit in Snowflake (SiS)"""
-    # Show app info for SiS environment
-    st.sidebar.markdown("""
-    ### 🏔️ Streamlit in Snowflake (SiS)
-    This app runs natively in Snowflake and uses:
+@st.cache_data
+def get_suggested_queries() -> List[str]:
+    """Get suggested queries based on available semantic views"""
+    return [
+        "What's our total Snowflake usage?",
+        "Which warehouses cost the most?", 
+        "Show me slow queries",
+        "Who are the most active users?",
+        "Any suspicious activity?",
+        "What's the cost trend?"
+    ]
+
+def render_sidebar_info():
+    """Render sidebar information"""
+    st.sidebar.markdown(f"""
+    ### {CONFIG['app_icon']} SiS Analytics
     - Native Snowpark Session
-    - Cortex Analyst Integration
-    - Semantic Views for AI Queries
+    - Cortex Analyst AI
+    - Dynamic Semantic Views
+    - Credit Rate: 1 = ${CONFIG['credit_to_dollar_rate']}
     """)
+
+def render_footer():
+    """Render application footer"""
+    st.markdown("---")
+    st.markdown(
+        f"<div style='text-align: center; color: #666;'>"
+        f"{CONFIG['app_icon']} Powered by Snowflake SiS | "
+        f"Cortex Analyst | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+def main():
+    """Main application entry point"""
+    render_sidebar_info()
     
     # Navigation
     st.sidebar.title("🎯 Navigation")
     page = st.sidebar.selectbox(
         "Choose Interface",
-        ["🤖 AI Chat Interface", "📊 Dashboard View"]
+        ["🤖 AI Chat", "📊 Dashboard"]
     )
     
-    # Page routing
-    if page == "🤖 AI Chat Interface":
+    # Route to appropriate interface
+    if page == "🤖 AI Chat":
         chat_interface()
-    elif page == "📊 Dashboard View":
+    else:
         dashboard_view()
     
-    # Footer with SiS specific information
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: #666;'>"
-        "🏔️ Powered by Snowflake Streamlit in Snowflake (SiS) | "
-        "Cortex Analyst & Semantic Views | "
-        f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        "</div>",
-        unsafe_allow_html=True
-    )
+    render_footer()
 
 if __name__ == "__main__":
     main()
