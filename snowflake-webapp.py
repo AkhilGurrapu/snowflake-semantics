@@ -418,6 +418,144 @@ def execute_sql_query(sql_query: str) -> Optional[pd.DataFrame]:
         st.error(f"Query execution failed: {e}")
         return None
 
+def check_semantic_view_exists(semantic_view: str) -> bool:
+    """Check if semantic view exists"""
+    session = get_snowflake_session()
+    if not session:
+        return False
+    
+    try:
+        # Try to show the semantic view
+        query = f"SHOW SEMANTIC VIEWS LIKE '{semantic_view}' IN {CONFIG['semantic_schema']}"
+        result = session.sql(query).collect()
+        return len(result) > 0
+    except Exception:
+        try:
+            # Alternative check - try to query information schema
+            schema_parts = CONFIG['semantic_schema'].split('.')
+            query = f"""
+            SELECT table_name 
+            FROM {schema_parts[0]}.information_schema.tables 
+            WHERE table_schema = '{schema_parts[1]}' 
+            AND table_name = '{semantic_view.upper()}'
+            """
+            result = session.sql(query).collect()
+            return len(result) > 0
+        except Exception:
+            return False
+
+def get_semantic_view_info(semantic_view: str) -> Dict[str, Any]:
+    """Get information about available dimensions and metrics in a semantic view"""
+    session = get_snowflake_session()
+    if not session:
+        return {}
+    
+    info = {"dimensions": [], "metrics": [], "tables": [], "exists": False, "can_query": False}
+    
+    # First check if semantic view exists
+    info["exists"] = check_semantic_view_exists(semantic_view)
+    
+    if not info["exists"]:
+        return info
+    
+    # Use the recommended SHOW commands to discover structure
+    try:
+        # Method 1: Get dimensions using SHOW SEMANTIC DIMENSIONS
+        try:
+            dim_result = session.sql(f"SHOW SEMANTIC DIMENSIONS IN {CONFIG['semantic_schema']}.{semantic_view}").collect()
+            table_names = set()
+            for row in dim_result:
+                row_dict = row.as_dict()
+                name = row_dict.get('name', '')
+                table_name = row_dict.get('table_name', '')
+                if table_name:
+                    table_names.add(table_name)
+                    info["dimensions"].append(f"{table_name}.{name}")
+                else:
+                    info["dimensions"].append(name)
+            
+            # Store unique table names
+            info["tables"] = list(table_names)
+        except Exception as e:
+            st.warning(f"Could not get semantic dimensions: {e}")
+        
+        # Method 2: Get metrics using SHOW SEMANTIC METRICS  
+        try:
+            metric_result = session.sql(f"SHOW SEMANTIC METRICS IN {CONFIG['semantic_schema']}.{semantic_view}").collect()
+            for row in metric_result:
+                row_dict = row.as_dict()
+                name = row_dict.get('name', '')
+                table_name = row_dict.get('table_name', '')
+                if table_name:
+                    info["metrics"].append(f"{table_name}.{name}")
+                else:
+                    info["metrics"].append(name)
+        except Exception as e:
+            st.warning(f"Could not get semantic metrics: {e}")
+            
+    except Exception as e:
+        st.warning(f"Could not get semantic view structure: {e}")
+    
+    # Test if we can query with what we found
+    if info["dimensions"] or info["metrics"] or info["tables"]:
+        info["can_query"] = True
+    else:
+        # Try a simple wildcard query as last resort
+        try:
+            # Try the documented approach: use *.* for all dimensions and metrics
+            test_query = f"SELECT * FROM SEMANTIC_VIEW({CONFIG['semantic_schema']}.{semantic_view} DIMENSIONS *.* METRICS *.*) LIMIT 1"
+            session.sql(test_query).collect()
+            info["can_query"] = True
+        except Exception as e:
+            info["can_query"] = False
+            st.warning(f"Cannot query semantic view: {e}")
+    
+    return info
+
+def execute_semantic_view_query(semantic_view: str, dimensions: List[str] = None, metrics: List[str] = None, where_clause: str = None) -> Optional[pd.DataFrame]:
+    """Execute semantic view query with proper syntax"""
+    session = get_snowflake_session()
+    if not session:
+        return None
+    
+    # SEMANTIC_VIEW requires at least one of DIMENSIONS, METRICS, or FACTS
+    # Note: Plain wildcards (*) are not supported, need table.* format
+    if not dimensions and not metrics:
+        # Cannot proceed without knowing table names for wildcards
+        st.error("Cannot query semantic view without knowing dimensions, metrics, or table names")
+        return None
+    
+    try:
+        # Build semantic view query
+        parts = ["SELECT * FROM SEMANTIC_VIEW("]
+        parts.append(f"    {CONFIG['semantic_schema']}.{semantic_view}")
+        
+        if dimensions:
+            parts.append(f"    DIMENSIONS {', '.join(dimensions)}")
+        
+        if metrics:
+            parts.append(f"    METRICS {', '.join(metrics)}")
+        
+        parts.append(")")
+        
+        if where_clause:
+            parts.append(f"WHERE {where_clause}")
+        
+        sql_query = "\n".join(parts)
+        
+        result = session.sql(sql_query).collect()
+        return pd.DataFrame([row.as_dict() for row in result]) if result else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Semantic view query failed: {e}")
+        # Fallback to a simple query that should work
+        try:
+            fallback_query = f"SHOW COLUMNS IN {CONFIG['semantic_schema']}.{semantic_view}"
+            session.sql(fallback_query).collect()
+            st.info("Semantic view exists but query syntax may need adjustment")
+        except Exception:
+            st.error(f"Semantic view {semantic_view} may not exist or is not accessible")
+        return None
+
 @st.cache_data
 def get_available_semantic_views() -> List[str]:
     """Get available semantic views dynamically"""
@@ -433,27 +571,42 @@ def get_available_semantic_views() -> List[str]:
             "security_monitoring_semantic"
         ]
     
+    found_views = []
+    
     try:
-        # Try to get views dynamically from the schema
-        schema_parts = CONFIG['semantic_schema'].split('.')
-        query = f"""
-        SELECT table_name 
-        FROM {schema_parts[0]}.information_schema.tables 
-        WHERE table_schema = '{schema_parts[1]}' 
-        AND table_type = 'VIEW'
-        AND table_name LIKE '%semantic%'
-        """
+        # First try to show semantic views directly
+        query = f"SHOW SEMANTIC VIEWS IN {CONFIG['semantic_schema']}"
         result = session.sql(query).collect()
         if result:
-            return [row['TABLE_NAME'].lower() for row in result]
+            found_views = [row['name'].lower() for row in result if 'name' in row.as_dict()]
     except Exception:
-        pass
+        try:
+            # Fallback: try to get views from information schema
+            schema_parts = CONFIG['semantic_schema'].split('.')
+            query = f"""
+            SELECT table_name 
+            FROM {schema_parts[0]}.information_schema.tables 
+            WHERE table_schema = '{schema_parts[1]}' 
+            AND (table_type = 'VIEW' OR table_type = 'SEMANTIC VIEW')
+            AND table_name LIKE '%SEMANTIC%'
+            """
+            result = session.sql(query).collect()
+            if result:
+                found_views = [row['TABLE_NAME'].lower() for row in result]
+        except Exception:
+            pass
+    
+    # If we found actual views, return them, otherwise use fallback
+    if found_views:
+        return found_views
     
     # Fallback to known views
     return [
+        "sample_warehouse_usage",  # Simple test view from account usage
+        "simple_test_view",        # Ultra simple test view with hardcoded data
+        "cost_analysis_semantic",  # Your existing views
         "snowflake_monitoring_semantic",
         "query_performance_semantic", 
-        "cost_analysis_semantic",
         "user_activity_semantic",
         "resource_utilization_semantic",
         "security_monitoring_semantic"
@@ -776,7 +929,7 @@ def chat_interface():
         st.rerun()
 
 def dashboard_view():
-    """Traditional dashboard view"""
+    """Comprehensive Snowflake monitoring dashboard"""
     st.markdown('<h1 class="main-header">📊 Snowflake Analytics Dashboard</h1>', unsafe_allow_html=True)
     
     # Get session
@@ -785,86 +938,673 @@ def dashboard_view():
         st.error("❌ Unable to connect to Snowflake")
         return
     
-    # Overview metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Get all available semantic views
+    semantic_views = get_available_semantic_views()
     
-    # Get overview data
-    base_view = get_available_semantic_views()[0]  # Use first available view
-    overview_data = execute_sql_query(f"""
-        SELECT 
-            WAREHOUSE_NAME,
-            SUM(TOTAL_CREDITS) as TOTAL_CREDITS,
-            SUM(TOTAL_QUERIES) as TOTAL_QUERIES
-        FROM {CONFIG['semantic_schema']}.{base_view}
-        GROUP BY WAREHOUSE_NAME
-    """)
+    # Dashboard configuration
+    st.sidebar.header("📊 Dashboard Settings")
     
-    if overview_data is not None and not overview_data.empty:
-        total_credits = float(overview_data['TOTAL_CREDITS'].sum())
-        total_queries = float(overview_data['TOTAL_QUERIES'].sum()) if 'TOTAL_QUERIES' in overview_data.columns else 0
-        active_warehouses = overview_data['WAREHOUSE_NAME'].nunique()
-        
-        with col1:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{format_credits(total_credits)}</div>
-                <div class="metric-label">Total Credits</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{total_queries:,}</div>
-                <div class="metric-label">Total Queries</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{active_warehouses}</div>
-                <div class="metric-label">Active Warehouses</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col4:
-            dollar_amount = total_credits * CONFIG['credit_to_dollar_rate']
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">${dollar_amount:,.2f}</div>
-                <div class="metric-label">Estimated Cost ({total_credits:,.1f} credits)</div>
-            </div>
-            """, unsafe_allow_html=True)
+    # Time range selector
+    time_range = st.sidebar.selectbox(
+        "📅 Time Range",
+        ["Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last 90 Days"]
+    )
     
-    # Charts
+    # Refresh data button
+    if st.sidebar.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+    
+    # Overview KPI Section
+    st.markdown("## 🎯 Key Performance Indicators")
+    render_kpi_section(semantic_views, time_range)
+    
+    # Main dashboard sections
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🏭 Warehouse Performance", 
+        "💰 Cost Analysis", 
+        "⚡ Query Performance", 
+        "👥 User Activity", 
+        "🔒 Security Monitoring"
+    ])
+    
+    with tab1:
+        render_warehouse_performance(semantic_views, time_range)
+    
+    with tab2:
+        render_cost_analysis(semantic_views, time_range)
+    
+    with tab3:
+        render_query_performance(semantic_views, time_range)
+    
+    with tab4:
+        render_user_activity(semantic_views, time_range)
+    
+    with tab5:
+        render_security_monitoring(semantic_views, time_range)
+
+def query_semantic_view_data(semantic_view: str, dimensions: List[str] = None, metrics: List[str] = None, limit: int = 1000) -> Optional[pd.DataFrame]:
+    """Query semantic view data with proper syntax based on scripts.sql definitions"""
+    session = get_snowflake_session()
+    if not session:
+        return None
+    
+    # Define correct semantic view queries based on actual CLI testing results
+    semantic_queries = {
+        "cost_analysis_semantic": {
+            "dimensions": ["costs.usage_date", "costs.warehouse_name", "costs.cost_category"],
+            "metrics": ["costs.total_cost", "costs.avg_daily_cost", "costs.compute_vs_cloud_ratio", "costs.high_cost_days"]
+        },
+        "resource_utilization_semantic": {
+            "dimensions": ["resources.warehouse_name", "resources.usage_date", "resources.usage_hour"],
+            "metrics": ["resources.total_credits_used", "resources.avg_credits_per_hour", "resources.compute_credits", "resources.cloud_credits"]
+        },
+        "query_performance_semantic": {
+            "dimensions": ["queries.query_type", "queries.warehouse_name", "queries.warehouse_size", "queries.user_name", "queries.usage_date"],
+            "metrics": ["queries.total_queries", "queries.avg_execution_time", "queries.slow_queries", "queries.total_data_scanned", "queries.avg_queue_time"]
+        },
+        "user_activity_semantic": {
+            "dimensions": ["users.user_name"],
+            "metrics": ["users.total_user_queries", "users.avg_user_execution_time", "users.slow_query_count", "users.data_scan_volume"]
+        },
+        "user_activity_queries_semantic": {
+            "dimensions": ["user_queries.query_type", "user_queries.warehouse_name"],
+            "metrics": []
+        },
+        "security_monitoring_semantic": {
+            "dimensions": ["security_users.user_name"],
+            "metrics": ["security_users.total_user_activity", "security_users.avg_user_execution_time", "security_users.user_data_access", "security_users.suspicious_activity", "security_users.long_running_queries"]
+        }
+    }
+    
+    try:
+        # Get predefined dimensions and metrics for this semantic view
+        view_config = semantic_queries.get(semantic_view, {})
+        
+        # Use provided dimensions/metrics or defaults
+        final_dimensions = dimensions if dimensions else view_config.get("dimensions", [])[:3]
+        final_metrics = metrics if metrics else view_config.get("metrics", [])[:3]
+        
+        # Build the query with correct syntax
+        query_parts = [f"SELECT * FROM SEMANTIC_VIEW({CONFIG['semantic_schema']}.{semantic_view}"]
+        
+        if final_dimensions:
+            query_parts.append(f"DIMENSIONS {', '.join(final_dimensions)}")
+        
+        if final_metrics:
+            query_parts.append(f"METRICS {', '.join(final_metrics)}")
+        
+        query_parts.append(f") LIMIT {limit}")
+        
+        query = " ".join(query_parts)
+        
+        result = session.sql(query).collect()
+        return pd.DataFrame([row.as_dict() for row in result]) if result else pd.DataFrame()
+        
+    except Exception as e:
+        st.warning(f"Failed to query {semantic_view}: {e}")
+        return None
+
+def render_kpi_section(semantic_views: List[str], time_range: str):
+    """Render the main KPI overview section with correct semantic view queries"""
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    # Total Credits from cost_analysis_semantic
+    with col1:
+        cost_data = query_semantic_view_data("cost_analysis_semantic", metrics=["costs.total_cost"])
+        total_credits = 0
+        
+        if cost_data is not None and not cost_data.empty:
+            # Get the numeric column (should be the last column since metrics come after dimensions)
+            numeric_cols = cost_data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                total_credits = float(cost_data[numeric_cols[0]].sum())
+            else:
+                # If no numeric columns found, try the last column
+                last_col = cost_data.columns[-1]
+                try:
+                    total_credits = float(cost_data[last_col].sum())
+                except:
+                    total_credits = 0
+            
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{total_credits:,.1f}</div>
+            <div class="metric-label">Total Credits</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Total Queries from query_performance_semantic
+    with col2:
+        query_data = query_semantic_view_data("query_performance_semantic", metrics=["queries.total_queries"])
+        total_queries = 0
+        
+        if query_data is not None and not query_data.empty:
+            # Get the numeric column
+            numeric_cols = query_data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                total_queries = float(query_data[numeric_cols[0]].sum())
+            else:
+                # If no numeric columns found, try the last column
+                last_col = query_data.columns[-1]
+                try:
+                    total_queries = float(query_data[last_col].sum())
+                except:
+                    total_queries = 0
+            
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{total_queries:,.0f}</div>
+            <div class="metric-label">Total Queries</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Active Warehouses from resource_utilization_semantic
+    with col3:
+        warehouse_data = query_semantic_view_data("resource_utilization_semantic", dimensions=["resources.warehouse_name"])
+        if warehouse_data is not None and not warehouse_data.empty and len(warehouse_data.columns) > 0 and len(warehouse_data) > 0:
+            active_warehouses = warehouse_data.iloc[:, 0].nunique()
+        else:
+            active_warehouses = 0
+            
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{active_warehouses}</div>
+            <div class="metric-label">Active Warehouses</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Estimated Cost
+    with col4:
+        estimated_cost = total_credits * CONFIG['credit_to_dollar_rate']
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">${estimated_cost:,.2f}</div>
+            <div class="metric-label">Estimated Cost</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Avg Query Time from query_performance_semantic
+    with col5:
+        perf_data = query_semantic_view_data("query_performance_semantic", metrics=["queries.avg_execution_time"])
+        avg_time = 0
+        
+        if perf_data is not None and not perf_data.empty:
+            # Get the numeric column
+            numeric_cols = perf_data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                avg_time = float(perf_data[numeric_cols[0]].mean())
+            else:
+                # If no numeric columns found, try the last column
+                last_col = perf_data.columns[-1]
+                try:
+                    avg_time = float(perf_data[last_col].mean())
+                except:
+                    avg_time = 0
+        
+        avg_time_formatted = format_duration(avg_time / 1000) if avg_time > 0 else "0s"
+            
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{avg_time_formatted}</div>
+            <div class="metric-label">Avg Query Time</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+def render_warehouse_performance(semantic_views: List[str], time_range: str):
+    """Render warehouse performance section with proper semantic view queries"""
+    st.markdown("### 🏭 Warehouse Performance Analysis")
+    
     col1, col2 = st.columns(2)
     
     with col1:
         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        st.subheader("🏭 Warehouse Usage")
+        st.subheader("💰 Credit Usage by Warehouse")
         
-        if overview_data is not None and not overview_data.empty:
-            warehouse_summary = overview_data.groupby('WAREHOUSE_NAME')['TOTAL_CREDITS'].sum().reset_index()
-            fig = px.pie(warehouse_summary, values='TOTAL_CREDITS', names='WAREHOUSE_NAME',
-                        title="Credits by Warehouse")
-            st.plotly_chart(fig, use_container_width=True)
+        data = query_semantic_view_data(
+            "resource_utilization_semantic",
+            dimensions=["resources.warehouse_name"],
+            metrics=["resources.total_credits_used"]
+        )
+        
+        if data is not None and not data.empty and len(data.columns) >= 2 and len(data) > 0:
+            # Create pie chart with proper column handling
+            try:
+                warehouse_col = data.columns[0]  # First column (warehouse name)
+                credits_col = data.columns[1]    # Second column (credits)
+                
+                fig = px.pie(
+                    data, 
+                    values=credits_col,
+                    names=warehouse_col,
+                    title="Credits by Warehouse",
+                    color_discrete_sequence=px.colors.qualitative.Set3
+                )
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No warehouse performance data available")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        st.subheader("📊 Warehouse Activity")
+        st.subheader("⚡ Total Credits by Warehouse")
         
-        if overview_data is not None and not overview_data.empty and 'TOTAL_QUERIES' in overview_data.columns:
-            warehouse_activity = overview_data.groupby('WAREHOUSE_NAME').agg({
-                'TOTAL_CREDITS': 'sum',
-                'TOTAL_QUERIES': 'sum'
-            }).reset_index()
-            
-            fig = px.scatter(warehouse_activity, x='TOTAL_QUERIES', y='TOTAL_CREDITS',
-                           text='WAREHOUSE_NAME', title="Warehouse Activity Overview",
-                           labels={'TOTAL_QUERIES': 'Total Queries', 'TOTAL_CREDITS': 'Total Credits'})
-            st.plotly_chart(fig, use_container_width=True)
+        data = query_semantic_view_data(
+            "resource_utilization_semantic",
+            dimensions=["resources.warehouse_name"],
+            metrics=["resources.total_credits_used"]
+        )
+        
+        if data is not None and not data.empty and len(data.columns) >= 2 and len(data) > 0:
+            # Create bar chart with proper column handling
+            try:
+                warehouse_col = data.columns[0]  # First column (warehouse name)
+                efficiency_col = data.columns[1]  # Second column (efficiency)
+                
+                fig = px.bar(
+                    data,
+                    x=warehouse_col,
+                    y=efficiency_col,
+                    title="Total Credits by Warehouse",
+                    color_discrete_sequence=["#00d4ff"]
+                )
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No utilization data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def render_cost_analysis(semantic_views: List[str], time_range: str):
+    """Render cost analysis section"""
+    st.markdown("### 💰 Cost Analysis & Trends")
+    
+    # Find cost analysis semantic view
+    cost_semantic = next((view for view in semantic_views if "cost_analysis" in view.lower()), None)
+    
+    if not cost_semantic:
+        st.warning("Cost analysis semantic view not found")
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("📈 Cost Trend Over Time")
+        
+        data = query_semantic_view_data(
+            cost_semantic,
+            dimensions=["costs.usage_date", "costs.warehouse_name"],
+            metrics=["costs.total_cost"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create line chart
+            try:
+                date_col = None
+                for col in data.columns:
+                    if 'date' in col.lower():
+                        date_col = col
+                        break
+                
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                if date_col and len(numeric_cols) > 0:
+                    fig = px.line(
+                        data,
+                        x=date_col,
+                        y=numeric_cols[0],
+                        color='WAREHOUSE_NAME' if 'WAREHOUSE_NAME' in data.columns else None,
+                        title="Daily Credit Consumption",
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    fig.update_layout(
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.dataframe(data, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No cost trend data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("🏷️ Cost Categories")
+        
+        data = query_semantic_view_data(
+            cost_semantic,
+            dimensions=["costs.cost_category"],
+            metrics=["costs.total_cost"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create donut chart
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                object_cols = data.select_dtypes(include=[object]).columns
+                
+                if len(numeric_cols) > 0 and len(object_cols) > 0:
+                    fig = px.pie(
+                        data,
+                        values=numeric_cols[0],
+                        names=object_cols[0],
+                        title="Cost Distribution by Category",
+                        hole=0.4,
+                        color_discrete_sequence=["#ff6b6b", "#feca57", "#48dbfb"]
+                    )
+                    fig.update_layout(
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.dataframe(data, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No cost category data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def render_query_performance(semantic_views: List[str], time_range: str):
+    """Render query performance section"""
+    st.markdown("### ⚡ Query Performance Metrics")
+    
+    # Find query performance semantic view
+    query_semantic = next((view for view in semantic_views if "query_performance" in view.lower()), None)
+    
+    if not query_semantic:
+        st.warning("Query performance semantic view not found")
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("🐌 Query Performance Distribution")
+        
+        data = query_semantic_view_data(
+            query_semantic,
+            dimensions=["queries.query_type"],
+            metrics=["queries.avg_execution_time", "queries.total_queries"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create scatter plot
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                cat_cols = data.select_dtypes(include=[object]).columns
+                
+                if len(numeric_cols) >= 2 and len(cat_cols) >= 1:
+                    fig = px.scatter(
+                        data,
+                        x=numeric_cols[1],
+                        y=numeric_cols[0],
+                        color=cat_cols[0],
+                        title="Query Performance by Type",
+                        size_max=20,
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    fig.update_layout(
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.dataframe(data, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No query performance data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("🎯 Slow Query Analysis")
+        
+        data = query_semantic_view_data(
+            query_semantic,
+            dimensions=["queries.warehouse_name"],
+            metrics=["queries.slow_queries", "queries.total_queries"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create bar chart
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                object_cols = data.select_dtypes(include=[object]).columns
+                
+                x_col = object_cols[0] if len(object_cols) > 0 else data.columns[0]
+                y_col = numeric_cols[0] if len(numeric_cols) > 0 else data.columns[-1]
+                
+                fig = px.bar(
+                    data,
+                    x=x_col,
+                    y=y_col,
+                    title="Slow Queries by Warehouse",
+                    color_discrete_sequence=["#ff6b6b"]
+                )
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No slow query data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def render_user_activity(semantic_views: List[str], time_range: str):
+    """Render user activity section"""
+    st.markdown("### 👥 User Activity Overview")
+    
+    # Find user activity semantic view
+    user_semantic = next((view for view in semantic_views if "user_activity" in view.lower()), None)
+    
+    if not user_semantic:
+        st.warning("User activity semantic view not found")
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("👤 Top Active Users")
+        
+        data = query_semantic_view_data(
+            user_semantic,
+            dimensions=["users.user_name"],
+            metrics=["users.total_user_queries"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create horizontal bar chart
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                object_cols = data.select_dtypes(include=[object]).columns
+                
+                y_col = object_cols[0] if len(object_cols) > 0 else data.columns[0]
+                x_col = numeric_cols[0] if len(numeric_cols) > 0 else data.columns[-1]
+                
+                fig = px.bar(
+                    data.head(10),
+                    y=y_col,
+                    x=x_col,
+                    title="Most Active Users",
+                    orientation='h',
+                    color_discrete_sequence=["#48dbfb"]
+                )
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No user activity data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("📊 Top Users by Query Count")
+        
+        # For user activity, we need to query users table separately from user_queries table
+        # due to granularity constraints
+        data = query_semantic_view_data(
+            user_semantic,
+            dimensions=["users.user_name"],
+            metrics=["users.total_user_queries"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create simple bar chart for user activity (no query types due to granularity constraints)
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                object_cols = data.select_dtypes(include=[object]).columns
+                
+                y_col = object_cols[0] if len(object_cols) > 0 else data.columns[0]
+                x_col = numeric_cols[0] if len(numeric_cols) > 0 else data.columns[-1]
+                
+                fig = px.bar(
+                    data.head(10),
+                    y=y_col,
+                    x=x_col,
+                    title="Top Users by Query Count",
+                    orientation='h',
+                    color_discrete_sequence=["#48dbfb"]
+                )
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No user query type data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def render_security_monitoring(semantic_views: List[str], time_range: str):
+    """Render security monitoring section"""
+    st.markdown("### 🔒 Security & Access Monitoring")
+    
+    # Find security monitoring semantic view
+    security_semantic = next((view for view in semantic_views if "security_monitoring" in view.lower()), None)
+    
+    if not security_semantic:
+        st.warning("Security monitoring semantic view not found")
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("⚠️ Suspicious Activity Detection")
+        
+        data = query_semantic_view_data(
+            security_semantic,
+            dimensions=["security_users.user_name"],
+            metrics=["security_users.suspicious_activity", "security_users.total_user_activity"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create bubble chart
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                cat_cols = data.select_dtypes(include=[object]).columns
+                
+                if len(numeric_cols) >= 2 and len(cat_cols) >= 1:
+                    fig = px.scatter(
+                        data,
+                        x=numeric_cols[1],
+                        y=numeric_cols[0],
+                        size=numeric_cols[0],
+                        hover_name=cat_cols[0],
+                        title="Data Access vs Suspicious Activity",
+                        color_discrete_sequence=["#ff6b6b"]
+                    )
+                    fig.update_layout(
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.dataframe(data, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No security data available")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        st.subheader("🐌 Long-Running Queries")
+        
+        data = query_semantic_view_data(
+            security_semantic,
+            dimensions=["security_users.user_name"],
+            metrics=["security_users.long_running_queries", "security_users.avg_user_execution_time"]
+        )
+        
+        if data is not None and not data.empty and len(data) > 0:
+            # Create bar chart
+            try:
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                object_cols = data.select_dtypes(include=[object]).columns
+                
+                x_col = object_cols[0] if len(object_cols) > 0 else data.columns[0]
+                y_col = numeric_cols[0] if len(numeric_cols) > 0 else data.columns[-1]
+                
+                fig = px.bar(
+                    data.head(10),
+                    x=x_col,
+                    y=y_col,
+                    title="Long-Running Queries by User",
+                    color_discrete_sequence=["#feca57"]
+                )
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create chart: {e}")
+                st.dataframe(data, use_container_width=True)
+        else:
+            st.info("No long-running query data available")
         st.markdown('</div>', unsafe_allow_html=True)
 
 @st.cache_data
@@ -879,15 +1619,77 @@ def get_suggested_queries() -> List[str]:
         "What's the cost trend?"
     ]
 
+def try_create_sample_semantic_view():
+    """Try to create a simple semantic view for testing if none exist"""
+    session = get_snowflake_session()
+    if not session:
+        return False
+    
+    try:
+        # First ensure the schema exists
+        schema_parts = CONFIG['semantic_schema'].split('.')
+        if len(schema_parts) == 2:
+            try:
+                session.sql(f"CREATE SCHEMA IF NOT EXISTS {CONFIG['semantic_schema']}").collect()
+            except Exception:
+                pass  # Schema might already exist
+        
+        # Try to create a simple semantic view from account usage
+        # Using correct column names: CREDITS_USED (not TOTAL_CREDITS)
+        sample_view_sql = f"""
+        CREATE OR REPLACE SEMANTIC VIEW {CONFIG['semantic_schema']}.sample_warehouse_usage
+        TABLES (
+            warehouse_usage AS SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY PRIMARY KEY (START_TIME, WAREHOUSE_ID)
+        )
+        DIMENSIONS (
+            warehouse_usage.WAREHOUSE_NAME AS warehouse_name,
+            warehouse_usage.START_TIME AS usage_date
+        )
+        METRICS (
+            warehouse_usage.CREDITS_USED AS credits_used
+        )
+        """
+        session.sql(sample_view_sql).collect()
+        st.success("✅ Created sample semantic view: sample_warehouse_usage")
+        
+        # Clear the cache so it picks up the new view
+        get_available_semantic_views.clear()
+        
+        return True
+    except Exception as e:
+        st.error(f"Could not create sample semantic view: {e}")
+        st.info("This might be due to permissions or the ACCOUNT_USAGE schema not being accessible.")
+        
+        # Try an even simpler approach with a basic query
+        try:
+            simple_view_sql = f"""
+            CREATE OR REPLACE SEMANTIC VIEW {CONFIG['semantic_schema']}.simple_test_view
+            TABLES (
+                test_data AS (
+                    SELECT 'COMPUTE_WH' as WAREHOUSE_NAME, 10.5 as CREDITS_USED, CURRENT_DATE() as USAGE_DATE
+                    UNION ALL
+                    SELECT 'LOAD_WH' as WAREHOUSE_NAME, 5.2 as CREDITS_USED, CURRENT_DATE() as USAGE_DATE
+                ) PRIMARY KEY (WAREHOUSE_NAME)
+            )
+            DIMENSIONS (
+                test_data.WAREHOUSE_NAME AS warehouse_name,
+                test_data.USAGE_DATE AS usage_date
+            )
+            METRICS (
+                test_data.CREDITS_USED AS credits_used
+            )
+            """
+            session.sql(simple_view_sql).collect()
+            st.success("✅ Created simple test semantic view: simple_test_view")
+            get_available_semantic_views.clear()
+            return True
+        except Exception as e2:
+            st.error(f"Even simple semantic view creation failed: {e2}")
+            return False
+
 def render_sidebar_info():
     """Render sidebar information"""
-    st.sidebar.markdown(f"""
-    ### {CONFIG['app_icon']} SiS Analytics
-    - Native Snowpark Session
-    - Cortex Analyst AI
-    - Dynamic Semantic Views
-    - Credit Rate: 1 = ${CONFIG['credit_to_dollar_rate']}
-    """)
+    # Sidebar info removed as requested - keeping function for consistency
 
 def render_footer():
     """Render application footer"""
