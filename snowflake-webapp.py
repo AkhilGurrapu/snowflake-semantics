@@ -640,21 +640,33 @@ def format_duration(seconds: float) -> str:
         return f"{seconds/3600:.1f}h"
 
 def generate_intelligent_answer(df: pd.DataFrame, user_query: str, session) -> str:
-    """Generate intelligent answer using Cortex LLM or fallback"""
+    """Generate intelligent answer with detailed context and object names"""
     if df.empty:
         return "No data found for your query."
     
     try:
-        data_summary = create_data_summary(df)
+        # Enhanced data analysis with object identification
+        detailed_answer = generate_detailed_object_answer(df, user_query)
+        if detailed_answer:
+            return detailed_answer
+        
+        # Fallback to LLM if detailed analysis fails
+        data_summary = create_enhanced_data_summary(df, user_query)
         
         prompt = f"""
         Question: {user_query}
         Data: {data_summary}
         
-        Provide a concise answer with specific numbers. 
+        Provide a concise, focused answer that includes:
+        1. Specific object names (warehouse names, user names, etc.)
+        2. Key numbers with proper formatting (credits as "X credits ($Y)")
+        3. Brief comparison or pattern if relevant
+        4. One actionable insight if applicable
+        
         For costs: multiply credits by {CONFIG['credit_to_dollar_rate']} for dollars.
-        Format: "X credits ($Y)" where Y = X × {CONFIG['credit_to_dollar_rate']}.
-        Keep under 25 words.
+        Format credits as "X credits ($Y)" where Y = X × {CONFIG['credit_to_dollar_rate']}.
+        Format durations as readable time (e.g., "2.5 minutes" not "150000ms").
+        Keep under 50 words. Be direct and actionable.
         """
         
         result = session.sql(f"""
@@ -666,12 +678,235 @@ def generate_intelligent_answer(df: pd.DataFrame, user_query: str, session) -> s
         
         if result:
             answer = result[0]['ANSWER'].strip().strip('"')
-            return answer if answer else generate_fallback_answer(df)
+            return answer if answer else generate_enhanced_fallback_answer(df, user_query)
             
     except Exception:
         pass
     
-    return generate_fallback_answer(df)
+    return generate_enhanced_fallback_answer(df, user_query)
+
+def generate_detailed_object_answer(df: pd.DataFrame, user_query: str) -> str:
+    """Generate detailed answer with specific object identification"""
+    if df.empty:
+        return None
+    
+    # Identify column types for better analysis
+    warehouse_cols = [col for col in df.columns if 'warehouse' in col.lower()]
+    user_cols = [col for col in df.columns if 'user' in col.lower()]
+    cost_cols = [col for col in df.columns if any(term in col.lower() for term in ['cost', 'credit', 'spend'])]
+    time_cols = [col for col in df.columns if any(term in col.lower() for term in ['time', 'duration', 'execution'])]
+    query_cols = [col for col in df.columns if 'query' in col.lower()]
+    date_cols = [col for col in df.columns if any(term in col.lower() for term in ['date', 'time'])]
+    
+    query_lower = user_query.lower()
+    
+    # Cost analysis with warehouse identification
+    if any(term in query_lower for term in ['cost', 'spend', 'billing', 'usage', 'credit']) and warehouse_cols and cost_cols:
+        return generate_cost_analysis_answer(df, warehouse_cols[0], cost_cols[0])
+    
+    # User activity analysis
+    if any(term in query_lower for term in ['user', 'who', 'person', 'account']) and user_cols:
+        return generate_user_activity_answer(df, user_cols[0], query_cols[0] if query_cols else None)
+    
+    # Performance analysis
+    if any(term in query_lower for term in ['slow', 'performance', 'time', 'execution']) and warehouse_cols and time_cols:
+        return generate_performance_answer(df, warehouse_cols[0], time_cols[0])
+    
+    # Warehouse analysis
+    if any(term in query_lower for term in ['warehouse', 'compute', 'resource']) and warehouse_cols:
+        return generate_warehouse_analysis_answer(df, warehouse_cols[0], cost_cols[0] if cost_cols else None)
+    
+    # General analysis with object identification
+    return generate_general_analysis_answer(df, warehouse_cols, user_cols, cost_cols)
+
+def generate_cost_analysis_answer(df: pd.DataFrame, warehouse_col: str, cost_col: str) -> str:
+    """Generate detailed cost analysis with specific warehouse names"""
+    if df.empty:
+        return "No cost data found."
+    
+    # Get top 3 warehouses by cost
+    top_warehouses = df.nlargest(3, cost_col)
+    
+    answers = []
+    for idx, row in top_warehouses.iterrows():
+        warehouse_name = row[warehouse_col]
+        cost_val = row[cost_col]
+        
+        if isinstance(cost_val, (int, float)):
+            dollars = cost_val * CONFIG['credit_to_dollar_rate']
+            answers.append(f"{warehouse_name}: {cost_val:.2f} credits (${dollars:.2f})")
+        else:
+            answers.append(f"{warehouse_name}: {cost_val}")
+    
+    if len(answers) == 1:
+        return f"The {answers[0]}."
+    elif len(answers) == 2:
+        return f"Top warehouses by cost: {answers[0]} and {answers[1]}."
+    else:
+        return f"Top warehouses by cost: {answers[0]}, {answers[1]}, and {answers[2]}."
+
+def generate_user_activity_answer(df: pd.DataFrame, user_col: str, query_col: str = None) -> str:
+    """Generate detailed user activity analysis with specific user names"""
+    if df.empty:
+        return "No user activity data found."
+    
+    # Get top 3 users
+    if query_col and query_col in df.columns:
+        # Sort by query count if available
+        top_users = df.nlargest(3, query_col)
+    else:
+        # Just take first 3 users
+        top_users = df.head(3)
+    
+    answers = []
+    for idx, row in top_users.iterrows():
+        user_name = row[user_col]
+        if query_col and query_col in row:
+            query_count = row[query_col]
+            answers.append(f"{user_name}: {query_count} queries")
+        else:
+            answers.append(user_name)
+    
+    if len(answers) == 1:
+        return f"Top user: {answers[0]}."
+    elif len(answers) == 2:
+        return f"Top users: {answers[0]} and {answers[1]}."
+    else:
+        return f"Top users: {answers[0]}, {answers[1]}, and {answers[2]}."
+
+def generate_performance_answer(df: pd.DataFrame, warehouse_col: str, time_col: str) -> str:
+    """Generate detailed performance analysis with specific warehouse names"""
+    if df.empty:
+        return "No performance data found."
+    
+    # Get top 3 warehouses by execution time (assuming higher is slower)
+    top_warehouses = df.nlargest(3, time_col)
+    
+    answers = []
+    for idx, row in top_warehouses.iterrows():
+        warehouse_name = row[warehouse_col]
+        time_val = row[time_col]
+        
+        if isinstance(time_val, (int, float)):
+            formatted_time = format_duration(time_val)
+            answers.append(f"{warehouse_name}: {formatted_time}")
+        else:
+            answers.append(f"{warehouse_name}: {time_val}")
+    
+    if len(answers) == 1:
+        return f"Slowest warehouse: {answers[0]}."
+    elif len(answers) == 2:
+        return f"Slowest warehouses: {answers[0]} and {answers[1]}."
+    else:
+        return f"Slowest warehouses: {answers[0]}, {answers[1]}, and {answers[2]}."
+
+def generate_warehouse_analysis_answer(df: pd.DataFrame, warehouse_col: str, cost_col: str = None) -> str:
+    """Generate detailed warehouse analysis with specific warehouse names"""
+    if df.empty:
+        return "No warehouse data found."
+    
+    warehouses = df[warehouse_col].unique()
+    
+    if cost_col and cost_col in df.columns:
+        # Include cost information if available
+        total_cost = df[cost_col].sum()
+        if isinstance(total_cost, (int, float)):
+            dollars = total_cost * CONFIG['credit_to_dollar_rate']
+            return f"Active warehouses: {', '.join(warehouses[:3])}. Total usage: {total_cost:.2f} credits (${dollars:.2f})."
+        else:
+            return f"Active warehouses: {', '.join(warehouses[:3])}."
+    else:
+        return f"Active warehouses: {', '.join(warehouses[:3])}."
+
+def generate_general_analysis_answer(df: pd.DataFrame, warehouse_cols: list, user_cols: list, cost_cols: list) -> str:
+    """Generate general analysis with object identification"""
+    if df.empty:
+        return "No data found."
+    
+    # Identify key objects in the data
+    objects = []
+    
+    if warehouse_cols:
+        warehouses = df[warehouse_cols[0]].unique()
+        if len(warehouses) <= 3:
+            objects.append(f"warehouses: {', '.join(warehouses)}")
+        else:
+            objects.append(f"warehouses: {', '.join(warehouses[:2])} and {len(warehouses)-2} others")
+    
+    if user_cols:
+        users = df[user_cols[0]].unique()
+        if len(users) <= 3:
+            objects.append(f"users: {', '.join(users)}")
+        else:
+            objects.append(f"users: {', '.join(users[:2])} and {len(users)-2} others")
+    
+    if cost_cols:
+        total_cost = df[cost_cols[0]].sum()
+        if isinstance(total_cost, (int, float)):
+            dollars = total_cost * CONFIG['credit_to_dollar_rate']
+            objects.append(f"total: {total_cost:.2f} credits (${dollars:.2f})")
+    
+    if objects:
+        return f"Found {len(df)} records with {', '.join(objects)}."
+    else:
+        return f"Found {len(df)} records."
+
+def create_enhanced_data_summary(df: pd.DataFrame, user_query: str) -> str:
+    """Create enhanced data summary with context for better AI responses"""
+    if df.empty:
+        return "No data"
+    
+    # Identify query type for better context
+    query_lower = user_query.lower()
+    is_cost_query = any(term in query_lower for term in ['cost', 'spend', 'billing', 'usage', 'credit'])
+    is_user_query = any(term in query_lower for term in ['user', 'who', 'person', 'account'])
+    is_performance_query = any(term in query_lower for term in ['slow', 'performance', 'time', 'execution'])
+    is_warehouse_query = any(term in query_lower for term in ['warehouse', 'compute', 'resource'])
+    
+    summary = [f"Query Type: {'Cost' if is_cost_query else 'User' if is_user_query else 'Performance' if is_performance_query else 'Warehouse' if is_warehouse_query else 'General'}"]
+    summary.append(f"Columns: {', '.join(df.columns)}")
+    summary.append(f"Total Rows: {len(df)}")
+    
+    # Add detailed row information with context (limit to 3 rows for conciseness)
+    for idx, row in df.head(3).iterrows():
+        row_data = []
+        for col in df.columns:
+            if col in row and pd.notna(row[col]):
+                value = row[col]
+                # Format values based on column type
+                if 'cost' in col.lower() or 'credit' in col.lower():
+                    if isinstance(value, (int, float)):
+                        dollars = value * CONFIG['credit_to_dollar_rate']
+                        row_data.append(f"{col}: {value:.2f} credits (${dollars:.2f})")
+                    else:
+                        row_data.append(f"{col}: {value}")
+                elif 'time' in col.lower() or 'duration' in col.lower():
+                    if isinstance(value, (int, float)):
+                        row_data.append(f"{col}: {format_duration(value)}")
+                    else:
+                        row_data.append(f"{col}: {value}")
+                else:
+                    row_data.append(f"{col}: {value}")
+        if row_data:
+            summary.append(f"Row {idx + 1}: {', '.join(row_data)}")
+    
+    # Add insights based on data
+    if len(df) > 1:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            top_col = numeric_cols[0]
+            if 'cost' in top_col.lower() or 'credit' in top_col.lower():
+                max_val = df[top_col].max()
+                min_val = df[top_col].min()
+                avg_val = df[top_col].mean()
+                summary.append(f"Insights: Max {top_col}: {max_val:.2f} credits (${max_val * CONFIG['credit_to_dollar_rate']:.2f}), Min: {min_val:.2f} credits (${min_val * CONFIG['credit_to_dollar_rate']:.2f}), Avg: {avg_val:.2f} credits (${avg_val * CONFIG['credit_to_dollar_rate']:.2f})")
+            else:
+                max_val = df[top_col].max()
+                min_val = df[top_col].min()
+                avg_val = df[top_col].mean()
+                summary.append(f"Insights: Max {top_col}: {max_val}, Min: {min_val}, Avg: {avg_val:.2f}")
+    
+    return " | ".join(summary)
 
 def create_data_summary(df: pd.DataFrame) -> str:
     """Create concise data summary for LLM analysis"""
@@ -691,6 +926,139 @@ def create_data_summary(df: pd.DataFrame) -> str:
     
     summary.append(f"Total: {len(df)} rows")
     return " | ".join(summary)
+
+def generate_enhanced_fallback_answer(df: pd.DataFrame, user_query: str) -> str:
+    """Generate enhanced rule-based fallback answer with detailed context and object identification"""
+    if df.empty:
+        return "No data found for your query."
+    
+    # Identify column types for better analysis
+    cost_cols = [col for col in df.columns if any(term in col.lower() for term in ['cost', 'credit', 'price', 'spend'])]
+    warehouse_cols = [col for col in df.columns if 'warehouse' in col.lower()]
+    user_cols = [col for col in df.columns if 'user' in col.lower()]
+    time_cols = [col for col in df.columns if any(term in col.lower() for term in ['time', 'duration', 'execution'])]
+    query_cols = [col for col in df.columns if 'query' in col.lower()]
+    
+    # Get top 3 rows for better context
+    top_rows = df.head(3)
+    
+    # Generate detailed answer based on query type and data
+    query_lower = user_query.lower()
+    
+    if cost_cols and warehouse_cols:
+        # Cost analysis with specific warehouse names
+        warehouse_col = warehouse_cols[0]
+        cost_col = cost_cols[0]
+        
+        if len(top_rows) > 1:
+            # Multiple warehouses with specific names
+            answers = []
+            for idx, row in top_rows.iterrows():
+                warehouse = row[warehouse_col]
+                cost_val = row[cost_col]
+                if isinstance(cost_val, (int, float)):
+                    dollars = cost_val * CONFIG['credit_to_dollar_rate']
+                    answers.append(f"{warehouse}: {cost_val:.2f} credits (${dollars:.2f})")
+                else:
+                    answers.append(f"{warehouse}: {cost_val}")
+            
+            if len(answers) > 1:
+                return f"Top warehouses by cost: {', '.join(answers[:2])}"  # Show only top 2
+            else:
+                return f"{answers[0]}"
+        else:
+            # Single warehouse with specific name
+            warehouse = top_rows.iloc[0][warehouse_col]
+            cost_val = top_rows.iloc[0][cost_col]
+            if isinstance(cost_val, (int, float)):
+                dollars = cost_val * CONFIG['credit_to_dollar_rate']
+                return f"{warehouse} warehouse has {cost_val:.2f} credits (${dollars:.2f})"
+            return f"{warehouse} warehouse has {cost_val}"
+    
+    elif user_cols and query_cols:
+        # User activity analysis with specific user names
+        user_col = user_cols[0]
+        query_col = query_cols[0]
+        
+        if len(top_rows) > 1:
+            answers = []
+            for idx, row in top_rows.iterrows():
+                user = row[user_col]
+                queries = row[query_col]
+                answers.append(f"{user}: {queries} queries")
+            
+            return f"Top users by query count: {', '.join(answers[:2])}"  # Show only top 2
+        else:
+            user = top_rows.iloc[0][user_col]
+            queries = top_rows.iloc[0][query_col]
+            return f"Top user {user} executed {queries} queries"
+    
+    elif time_cols and warehouse_cols:
+        # Performance analysis with specific warehouse names
+        warehouse_col = warehouse_cols[0]
+        time_col = time_cols[0]
+        
+        if len(top_rows) > 1:
+            answers = []
+            for idx, row in top_rows.iterrows():
+                warehouse = row[warehouse_col]
+                time_val = row[time_col]
+                if isinstance(time_val, (int, float)):
+                    answers.append(f"{warehouse}: {format_duration(time_val)}")
+                else:
+                    answers.append(f"{warehouse}: {time_val}")
+            
+            return f"Warehouse performance: {', '.join(answers[:2])}"  # Show only top 2
+        else:
+            warehouse = top_rows.iloc[0][warehouse_col]
+            time_val = top_rows.iloc[0][time_col]
+            if isinstance(time_val, (int, float)):
+                return f"{warehouse} warehouse has {format_duration(time_val)} average execution time"
+            return f"{warehouse} warehouse has {time_val}"
+    
+    elif user_cols:
+        # User-focused query with specific user names
+        user_col = user_cols[0]
+        if len(top_rows) > 1:
+            users = [row[user_col] for _, row in top_rows.iterrows()]
+            return f"Top users: {', '.join(users[:2])}"  # Show only top 2
+        else:
+            return f"Top user: {top_rows.iloc[0][user_col]}"
+    
+    elif warehouse_cols:
+        # Warehouse-focused query with specific warehouse names
+        warehouse_col = warehouse_cols[0]
+        if len(top_rows) > 1:
+            warehouses = [row[warehouse_col] for _, row in top_rows.iterrows()]
+            return f"Active warehouses: {', '.join(warehouses[:2])}"  # Show only top 2
+        else:
+            return f"Active warehouse: {top_rows.iloc[0][warehouse_col]}"
+    
+    # Default response with more context and object identification
+    if len(df) > 1:
+        # Try to identify key objects in the data
+        objects = []
+        for col in df.columns[:2]:  # Look at first 2 columns
+            if col in top_rows.iloc[0] and pd.notna(top_rows.iloc[0][col]):
+                value = top_rows.iloc[0][col]
+                objects.append(f"{col}={value}")
+        
+        if objects:
+            return f"Found {len(df)} results. Top record: {', '.join(objects)}"
+        else:
+            return f"Found {len(df)} results with data in columns: {', '.join(df.columns[:3])}"
+    else:
+        # Single result with object identification
+        objects = []
+        for col in df.columns[:2]:  # Look at first 2 columns
+            if col in df.iloc[0] and pd.notna(df.iloc[0][col]):
+                value = df.iloc[0][col]
+                objects.append(f"{col}={value}")
+        
+        if objects:
+            return f"Found {len(df)} result: {', '.join(objects)}"
+        else:
+            return f"Found {len(df)} result with data in columns: {', '.join(df.columns[:3])}"
 
 def generate_fallback_answer(df: pd.DataFrame) -> str:
     """Generate rule-based fallback answer"""
@@ -1609,14 +1977,23 @@ def render_security_monitoring(semantic_views: List[str], time_range: str):
 
 @st.cache_data
 def get_suggested_queries() -> List[str]:
-    """Get suggested queries based on available semantic views"""
+    """Get enhanced suggested queries for better AI responses with object identification"""
     return [
-        "What's our total Snowflake usage?",
-        "Which warehouses cost the most?", 
-        "Show me slow queries",
-        "Who are the most active users?",
-        "Any suspicious activity?",
-        "What's the cost trend?"
+        "Which warehouses cost the most this week and what are their specific credit usage?",
+        "Who are our most active users and how many queries did each user execute?",
+        "Show me slow queries by warehouse with specific execution times and warehouse names",
+        "What's our peak usage time and which specific warehouses are busiest during those hours?",
+        "Identify warehouses with unusual usage patterns and their specific credit consumption",
+        "Show me user activity patterns by warehouse name and query type with execution counts",
+        "Which users have the longest running queries and what are their specific execution times?",
+        "What's the cost trend for each warehouse over time with specific credit amounts?",
+        "Show me security events and suspicious activity by user name and warehouse",
+        "Which warehouses are underutilized vs overutilized with their specific credit usage?",
+        "List all warehouses and their total credit consumption with dollar amounts",
+        "Show me the top 5 users by query count with their specific warehouse usage",
+        "Which warehouses have the highest average execution time and what are those times?",
+        "Display cost analysis by warehouse name with credits and dollar conversion",
+        "Show me user activity by warehouse with specific query counts and execution times"
     ]
 
 def try_create_sample_semantic_view():
