@@ -428,13 +428,3 @@ SELECT * FROM SEMANTIC_VIEW(
 ORDER BY total_credits_used DESC
 LIMIT 5;
 
--- Test Query 5: Enhanced security monitoring with context
-SELECT * FROM SEMANTIC_VIEW(
-    security_monitoring_semantic
-    DIMENSIONS user_name, warehouse_name, query_type
-    METRICS total_user_activity, suspicious_activity, long_running_queries
-)
-WHERE suspicious_activity > 0 OR long_running_queries > 0
-ORDER BY suspicious_activity DESC
-LIMIT 5;
-

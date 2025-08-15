@@ -512,6 +512,267 @@ def get_semantic_view_info(semantic_view: str) -> Dict[str, Any]:
     
     return info
 
+# Dynamic Semantic View Selection and Error Handling
+def get_dynamic_semantic_views(user_query: str) -> List[str]:
+    """Intelligent semantic view selection based on query analysis"""
+    
+    # Query intent classification
+    intent_classifier = {
+        'security': ['suspicious', 'security', 'anomaly', 'violation', 'breach', 'events'],
+        'cost': ['cost', 'spend', 'billing', 'credit', 'dollar', 'money', 'expense'],
+        'performance': ['slow', 'fast', 'time', 'speed', 'performance', 'execution'],
+        'usage': ['usage', 'activity', 'query', 'user', 'warehouse', 'total']
+    }
+    
+    # Score each intent
+    scores = {}
+    query_lower = user_query.lower()
+    
+    for intent, keywords in intent_classifier.items():
+        scores[intent] = sum(1 for keyword in keywords if keyword in query_lower)
+    
+    # Select top 2 intents for better coverage
+    top_intents = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:2]
+    
+    # Map to semantic views - use dynamic_monitoring for all cases
+    view_mapping = {
+        'security': 'dynamic_monitoring',
+        'cost': 'dynamic_monitoring', 
+        'performance': 'dynamic_monitoring',
+        'usage': 'dynamic_monitoring'
+    }
+    
+    selected_views = [view_mapping[intent] for intent, score in top_intents if score > 0]
+    return selected_views or ['dynamic_monitoring']  # Default fallback
+
+def analyze_cortex_error(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Analyze Cortex Analyst errors and provide actionable insights"""
+    
+    # First check if the SQL contains base table access patterns (which will cause invalid identifier errors)
+    if result and 'message' in result and 'content' in result['message']:
+        for content in result['message']['content']:
+            if content.get('type') == 'sql' and 'statement' in content:
+                sql = content['statement'].lower()
+                base_table_patterns = [
+                    'from query_performance_base',
+                    'total_elapsed_time',
+                    'bytes_scanned',
+                    'credits_used_cloud_services'
+                ]
+                if any(pattern in sql for pattern in base_table_patterns):
+                    return {
+                        'type': 'invalid_identifier',
+                        'solution': 'Use semantic view metrics instead of base table columns',
+                        'guidance': 'Try rephrasing to use business terms like "suspicious activity" instead of "bytes_scanned"',
+                        'user_message': '🔄 **Query Issue**: The AI tried to access technical database columns. Let me fix this by using business-friendly terms.',
+                        'original_error': 'Base table column access detected'
+                    }
+    
+    error_patterns = {
+        'invalid identifier': {
+            'type': 'invalid_identifier',
+            'solution': 'Use semantic view metrics instead of base table columns',
+            'guidance': 'Try rephrasing to use business terms like "suspicious activity" instead of "bytes_scanned"',
+            'user_message': '🔄 **Query Issue**: The AI tried to access technical database columns. Let me fix this by using business-friendly terms.'
+        },
+        'semantic view not found': {
+            'type': 'semantic_view_not_found', 
+            'solution': 'Use available semantic views or base tables',
+            'guidance': 'Available views: dynamic_monitoring, cost_analysis_simple',
+            'user_message': '🔍 **View Not Found**: The requested semantic view is not available. Using our dynamic monitoring view instead.'
+        },
+        'permission denied': {
+            'type': 'permission_error',
+            'solution': 'Check user permissions on semantic views',
+            'guidance': 'Contact administrator for access to semantic views',
+            'user_message': '🔒 **Permission Issue**: You may not have access to some data. Contact your administrator for access.'
+        },
+        'sql compilation error': {
+            'type': 'sql_compilation_error',
+            'solution': 'Query syntax needs adjustment',
+            'guidance': 'Try simplifying your question or using different terms',
+            'user_message': '⚙️ **Query Syntax**: The generated query had a syntax issue. Let me try a different approach.'
+        }
+    }
+    
+    error_message = extract_error_message(result) if result else "Unknown error"
+    
+    for pattern, info in error_patterns.items():
+        if pattern in error_message.lower():
+            return {**info, 'original_error': error_message}
+    
+    return {
+        'type': 'unknown_error',
+        'solution': 'Try simplifying your question',
+        'guidance': 'Ask about specific metrics like "cost", "users", or "performance"',
+        'original_error': error_message,
+        'user_message': '❓ **Unknown Issue**: Something unexpected happened. Try rephrasing your question.'
+    }
+
+def extract_error_message(result: Dict[str, Any]) -> str:
+    """Extract error message from Cortex Analyst response"""
+    try:
+        if 'error' in result:
+            return result['error'].get('message', 'Unknown error')
+        elif 'message' in result and 'content' in result['message']:
+            for content in result['message']['content']:
+                if content.get('type') == 'error':
+                    return content.get('text', 'Unknown error')
+        return 'Unknown error'
+    except:
+        return 'Unknown error'
+
+def has_sql_error(result: Dict[str, Any]) -> bool:
+    """Check if Cortex Analyst response contains SQL errors"""
+    if not result:
+        return True
+    
+    # Check for explicit error in response
+    if 'error' in result:
+        return True
+    
+    # Check for error in message content
+    if 'message' in result and 'content' in result['message']:
+        for content in result['message']['content']:
+            if content.get('type') == 'error':
+                return True
+    
+    # Check if SQL tries to access base table columns directly (which will cause errors)
+    if 'message' in result and 'content' in result['message']:
+        for content in result['message']['content']:
+            if content.get('type') == 'sql' and 'statement' in content:
+                sql = content['statement'].lower()
+                # Check for direct base table column access patterns
+                base_table_patterns = [
+                    'from query_performance_base',
+                    'total_elapsed_time',
+                    'bytes_scanned',
+                    'credits_used_cloud_services'
+                ]
+                if any(pattern in sql for pattern in base_table_patterns):
+                    return True
+    
+    return False
+
+def execute_cortex_query_with_fallback(user_query: str, session) -> Dict[str, Any]:
+    """Execute Cortex Analyst query with comprehensive error handling"""
+    
+    # Step 1: Try with dynamic semantic views
+    semantic_views = get_dynamic_semantic_views(user_query)
+    result = call_cortex_analyst_api(user_query, semantic_views)
+    
+    if result and not has_sql_error(result):
+        return result
+    
+    # Step 2: Error analysis and recovery
+    error_info = analyze_cortex_error(result)
+    
+    # Display user-friendly error message
+    st.warning(error_info['user_message'])
+    
+    if error_info['type'] == 'invalid_identifier':
+        # Try with simplified query approach
+        return execute_simplified_query(user_query, session, error_info)
+    
+    elif error_info['type'] == 'semantic_view_not_found':
+        # Try with base table approach
+        return execute_base_table_query(user_query, session)
+    
+    elif error_info['type'] == 'permission_error':
+        # Provide clear guidance
+        return create_permission_error_response(error_info)
+    
+    # Step 3: Final fallback
+    return create_fallback_response(user_query, error_info)
+
+def execute_simplified_query(user_query: str, session, error_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute simplified query when complex query fails"""
+    
+    # Create a simplified version of the query
+    simplified_queries = {
+        'suspicious': f'SELECT user_name, warehouse_name, COUNT(*) as total_events FROM {CONFIG["semantic_schema"]}.dynamic_monitoring GROUP BY user_name, warehouse_name ORDER BY total_events DESC',
+        'cost': f'SELECT warehouse_name, SUM(total_cost) as total_credits FROM {CONFIG["semantic_schema"]}.dynamic_monitoring GROUP BY warehouse_name ORDER BY total_credits DESC',
+        'performance': f'SELECT warehouse_name, AVG(avg_time) as avg_execution_time FROM {CONFIG["semantic_schema"]}.dynamic_monitoring GROUP BY warehouse_name ORDER BY avg_execution_time DESC',
+        'execution': f'SELECT warehouse_name, AVG(avg_time) as avg_execution_time FROM {CONFIG["semantic_schema"]}.dynamic_monitoring GROUP BY warehouse_name ORDER BY avg_execution_time DESC',
+        'time': f'SELECT warehouse_name, AVG(avg_time) as avg_execution_time FROM {CONFIG["semantic_schema"]}.dynamic_monitoring GROUP BY warehouse_name ORDER BY avg_execution_time DESC',
+        'usage': f'SELECT user_name, COUNT(*) as total_queries FROM {CONFIG["semantic_schema"]}.dynamic_monitoring GROUP BY user_name ORDER BY total_queries DESC'
+    }
+    
+    query_lower = user_query.lower()
+    
+    for keyword, sql in simplified_queries.items():
+        if keyword in query_lower:
+            try:
+                result = session.sql(sql).collect()
+                return {
+                    'success': True,
+                    'data': result,
+                    'sql': sql,
+                    'message': f'✅ Simplified query executed successfully for "{keyword}" related question.'
+                }
+            except Exception as e:
+                continue
+    
+    # If no simplified query works, return error info
+    return {
+        'success': False,
+        'error': error_info,
+        'message': '❌ Could not execute simplified query. Please try rephrasing your question.'
+    }
+
+def execute_base_table_query(user_query: str, session) -> Dict[str, Any]:
+    """Execute query directly on base tables when semantic views fail"""
+    
+    try:
+        # Simple base table query
+        sql = """
+        SELECT 
+            user_name,
+            warehouse_name,
+            COUNT(*) as total_queries,
+            AVG(total_elapsed_time) as avg_time
+        FROM query_performance_base 
+        GROUP BY user_name, warehouse_name 
+        ORDER BY total_queries DESC 
+        LIMIT 10
+        """
+        
+        result = session.sql(sql).collect()
+        return {
+            'success': True,
+            'data': result,
+            'sql': sql,
+            'message': '✅ Executed base table query as fallback.'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'message': '❌ Base table query also failed. Please check your permissions.'
+        }
+
+def create_permission_error_response(error_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Create response for permission errors"""
+    return {
+        'success': False,
+        'error': error_info,
+        'message': '🔒 Permission denied. Please contact your administrator for access to semantic views.'
+    }
+
+def create_fallback_response(user_query: str, error_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Create fallback response when all else fails"""
+    return {
+        'success': False,
+        'error': error_info,
+        'message': f'❓ Unable to process your question: "{user_query}". Please try simplifying your question or contact support.',
+        'suggestions': [
+            'Try asking about "cost by warehouse"',
+            'Ask about "suspicious user activity"', 
+            'Query "performance by warehouse"',
+            'Request "user activity summary"'
+        ]
+    }
+
 def execute_semantic_view_query(semantic_view: str, dimensions: List[str] = None, metrics: List[str] = None, where_clause: str = None) -> Optional[pd.DataFrame]:
     """Execute semantic view query with proper syntax"""
     session = get_snowflake_session()
@@ -1217,76 +1478,111 @@ def chat_interface():
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Process the query with Cortex Analyst
+        # Process the query with Dynamic Cortex Analyst System
         with st.chat_message("assistant"):
             with st.spinner("🤖 AI is analyzing your query..."):
-                # Step 1: Call Cortex Analyst API
-                semantic_views = get_available_semantic_views()
-                cortex_response = call_cortex_analyst_api(prompt, semantic_views)
+                # Step 1: Use dynamic semantic view selection and error handling
+                session = get_snowflake_session()
+                result = execute_cortex_query_with_fallback(prompt, session)
                 
-                if cortex_response:
-                    # Extract AI interpretation and SQL - exactly like local app.py
-                    ai_interpretation = extract_text_from_cortex_response(cortex_response)
-                    generated_sql = extract_sql_from_cortex_response(cortex_response)
-                    
-                    # Display AI interpretation (only once)
-                    if ai_interpretation:
-                        st.markdown(f"""
-                        <div class="ai-insights">
-                            <strong>🤖 AI Analysis:</strong><br>
-                            {ai_interpretation}
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Display generated SQL in dropdown
-                    if generated_sql:
-                        with st.expander("🔍 View Generated SQL", expanded=False):
+                if result and result.get('success', False):
+                    # Success case - display results
+                    if 'data' in result:
+                        df = pd.DataFrame([row.as_dict() for row in result['data']]) if result['data'] else pd.DataFrame()
+                        
+                        if not df.empty:
+                            # Generate intelligent answer
+                            concise_answer = generate_intelligent_answer(df, prompt, session)
                             st.markdown(f"""
-                            <div class="sql-content">
-                                {generated_sql}
+                            <div class="concise-answer">
+                                🎯 <strong>Answer:</strong> {concise_answer}
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # Display data
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.warning("❌ No data found for your query.")
+                    
+                    # Display success message if provided
+                    if 'message' in result:
+                        st.success(result['message'])
+                        
+                elif result and not result.get('success', False):
+                    # Error case - display error message
+                    st.error(result.get('message', '❌ Query failed'))
+                    
+                    # Display suggestions if available
+                    if 'suggestions' in result:
+                        st.markdown("**💡 Try these questions instead:**")
+                        for suggestion in result['suggestions']:
+                            st.markdown(f"• {suggestion}")
+                else:
+                    # Fallback to original method
+                    semantic_views = get_available_semantic_views()
+                    cortex_response = call_cortex_analyst_api(prompt, semantic_views)
+                    
+                    if cortex_response:
+                        # Extract AI interpretation and SQL
+                        ai_interpretation = extract_text_from_cortex_response(cortex_response)
+                        generated_sql = extract_sql_from_cortex_response(cortex_response)
+                        
+                        # Display AI interpretation
+                        if ai_interpretation:
+                            st.markdown(f"""
+                            <div class="ai-insights">
+                                <strong>🤖 AI Analysis:</strong><br>
+                                {ai_interpretation}
                             </div>
                             """, unsafe_allow_html=True)
                         
-                        # Execute the generated SQL
-                        with st.spinner("📊 Executing query..."):
-                            df = execute_sql_query(generated_sql)
-                            
-                            if df is not None and not df.empty:
-                                # Generate intelligent answer
-                                session = get_snowflake_session()
-                                concise_answer = generate_intelligent_answer(df, prompt, session)
+                        # Display generated SQL in dropdown
+                        if generated_sql:
+                            with st.expander("🔍 View Generated SQL", expanded=False):
                                 st.markdown(f"""
-                                <div class="concise-answer">
-                                    🎯 <strong>Answer:</strong> {concise_answer}
+                                <div class="sql-content">
+                                    {generated_sql}
                                 </div>
                                 """, unsafe_allow_html=True)
+                            
+                            # Execute the generated SQL
+                            with st.spinner("📊 Executing query..."):
+                                df = execute_sql_query(generated_sql)
                                 
-                                # Show data results
-                                st.markdown("**📊 Query Results:**")
-                                st.dataframe(df, use_container_width=True)
-                                
-                                # Create visualization if data supports it
-                                if len(df) > 1:
-                                    st.markdown("**📈 Data Visualization:**")
-                                    fig = create_simple_visualization(df)
-                                    st.plotly_chart(fig, use_container_width=True)
-                                
-                                # Add assistant response to chat history
-                                response_content = f"Answer: {concise_answer}\n\nAI Analysis: {ai_interpretation}\n\nData: {len(df)} records found"
-                                st.session_state.messages.append({"role": "assistant", "content": response_content})
-                                
-                            else:
-                                error_msg = "❌ No data found for your query. The AI-generated SQL didn't return any results."
-                                st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
-                                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                                if df is not None and not df.empty:
+                                    # Generate intelligent answer
+                                    concise_answer = generate_intelligent_answer(df, prompt, session)
+                                    st.markdown(f"""
+                                    <div class="concise-answer">
+                                        🎯 <strong>Answer:</strong> {concise_answer}
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    
+                                    # Show data results
+                                    st.dataframe(df, use_container_width=True)
+                                    
+                                    # Create visualization if data supports it
+                                    if len(df) > 1:
+                                        st.markdown("**📈 Data Visualization:**")
+                                        fig = create_simple_visualization(df)
+                                        st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    # Add assistant response to chat history
+                                    response_content = f"Answer: {concise_answer}\n\nAI Analysis: {ai_interpretation}\n\nData: {len(df)} records found"
+                                    st.session_state.messages.append({"role": "assistant", "content": response_content})
+                                    
+                                else:
+                                    error_msg = "❌ No data found for your query. The AI-generated SQL didn't return any results."
+                                    st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
+                                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                        else:
+                            error_msg = "❌ Cortex Analyst couldn't generate SQL for your query. Try rephrasing your question."
+                            st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
+                            st.session_state.messages.append({"role": "assistant", "content": error_msg})
                     else:
-                        error_msg = "❌ Cortex Analyst couldn't generate SQL for your query. Try rephrasing your question."
+                        error_msg = "❌ Failed to connect to Cortex Analyst. Please check your configuration."
                         st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
                         st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                else:
-                    error_msg = "❌ Failed to connect to Cortex Analyst. Please check your configuration."
-                    st.markdown(f'<div class="status-error">{error_msg}</div>', unsafe_allow_html=True)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
     
     # Always show chat input at the end
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1365,15 +1661,15 @@ def query_semantic_view_data(semantic_view: str, dimensions: List[str] = None, m
         },
         "resource_utilization_semantic": {
             "dimensions": ["resources.warehouse_name", "resources.usage_date", "resources.usage_hour"],
-            "metrics": ["resources.total_credits_used", "resources.avg_credits_per_hour", "resources.compute_credits", "resources.cloud_credits"]
+            "metrics": ["resources.total_credits_used", "resources.avg_credits_per_hour", "resources.utilization_efficiency", "resources.peak_usage_hours"]
         },
         "query_performance_semantic": {
             "dimensions": ["queries.query_type", "queries.warehouse_name", "queries.warehouse_size", "queries.user_name", "queries.usage_date"],
             "metrics": ["queries.total_queries", "queries.avg_execution_time", "queries.slow_queries", "queries.total_data_scanned", "queries.avg_queue_time"]
         },
         "user_activity_semantic": {
-            "dimensions": ["users.user_name"],
-            "metrics": ["users.total_user_queries", "users.avg_user_execution_time", "users.slow_query_count", "users.data_scan_volume"]
+            "dimensions": ["user_activity.user_name"],
+            "metrics": ["user_activity.total_user_queries", "user_activity.avg_user_execution_time", "user_activity.slow_query_count", "user_activity.data_scan_volume"]
         },
         "user_activity_queries_semantic": {
             "dimensions": ["user_queries.query_type", "user_queries.warehouse_name"],
@@ -1806,8 +2102,8 @@ def render_user_activity(semantic_views: List[str], time_range: str):
         
         data = query_semantic_view_data(
             user_semantic,
-            dimensions=["users.user_name"],
-            metrics=["users.total_user_queries"]
+            dimensions=["user_activity.user_name"],
+            metrics=["user_activity.total_user_queries"]
         )
         
         if data is not None and not data.empty and len(data) > 0:
@@ -1848,8 +2144,8 @@ def render_user_activity(semantic_views: List[str], time_range: str):
         # due to granularity constraints
         data = query_semantic_view_data(
             user_semantic,
-            dimensions=["users.user_name"],
-            metrics=["users.total_user_queries"]
+            dimensions=["user_activity.user_name"],
+            metrics=["user_activity.total_user_queries"]
         )
         
         if data is not None and not data.empty and len(data) > 0:
